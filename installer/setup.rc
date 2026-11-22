@@ -1,0 +1,46 @@
+// Resource script for the TS3 Speaking Overlay installer.
+// Compiled by windres with the payload DLL embedded into the EXE.
+
+#pragma code_page(65001)
+
+#include "res.h"
+
+IDI_APP ICON "setup.ico"
+
+// Both bitness variants are embedded; setup.cpp picks the one matching the
+// detected TeamSpeak client (API 26 for x64 3.6.x, API 25 for x86 clients).
+IDR_PAYLOAD_DLL   RCDATA "ts3_speaking_overlay_win64.dll"
+IDR_PAYLOAD_DLL32 RCDATA "ts3_speaking_overlay_win32.dll"
+
+// Common controls v6 + per-monitor DPI awareness, so the dialog is not blurry.
+// NOTE: the resource id must NOT be 1. MinGW's linker appends its own
+// default-manifest.o (CREATEPROCESS_MANIFEST_RESOURCE_ID = 1) and two non-default
+// manifests in one image make ld fail with "multiple non-default manifests".
+// Id 2 is the documented alternative slot for a process manifest.
+2 24 "setup.manifest"
+
+1 VERSIONINFO
+FILEVERSION     1,0,0,0
+PRODUCTVERSION  1,0,0,0
+FILEOS          0x00040004L
+FILETYPE        0x00000001L
+BEGIN
+    BLOCK "StringFileInfo"
+    BEGIN
+        BLOCK "080404B0"
+        BEGIN
+            VALUE "CompanyName",      "ts3-speaking-overlay"
+            VALUE "FileDescription",  "TS3 Speaking Overlay 安装程序"
+            VALUE "FileVersion",      "1.0.0.0"
+            VALUE "InternalName",     "ts3overlay-setup"
+            VALUE "OriginalFilename", "TS3SpeakingOverlay-Setup.exe"
+            VALUE "ProductName",      "TS3 Speaking Overlay"
+            VALUE "ProductVersion",   "1.0.0.0"
+            VALUE "LegalCopyright",   "MIT License"
+        END
+    END
+    BLOCK "VarFileInfo"
+    BEGIN
+        VALUE "Translation", 0x0804, 1200
+    END
+END

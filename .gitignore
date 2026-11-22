@@ -1,0 +1,18 @@
+# Build output (regenerate with build.ps1 / build-installer.ps1)
+*.o
+*.obj
+*.exe
+*.dll
+!dist/TS3SpeakingOverlay-Setup.exe
+!dist/ts3_speaking_overlay_win64.dll
+!dist/ts3_speaking_overlay_win32.dll
+
+# Local state written by the overlay at runtime
+overlay.ini
+overlay.ini.bak
+test_overlay.ini
+*.log
+
+# Build staging / toolchains
+/sdk/
+/build/
