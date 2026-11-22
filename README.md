@@ -1,5 +1,7 @@
 # TS3 Speaking Overlay
 
+[English](README.en.md) | **简体中文**
+
 一个 TeamSpeak 3 客户端插件：像 KOOK 那样，在屏幕上层用悬浮窗实时显示**当前频道里的所有人**——正在说话的人高亮并带呼吸绿环，没说话的人保持原位但**变暗**，不会整块消失。
 
 ![悬浮窗效果](docs/overlay.png)
@@ -28,9 +30,9 @@
 - 自动找到 TS3，按这个顺序试：**运行中的 TS3 进程 → 注册表 `HKCU\Software\TeamSpeak 3 Client` → 各固定盘的常见目录（teamspeak / TeamSpeak3 / ts3 / Program Files\TeamSpeak 3 Client …）→ 限深扫描各盘根目录（最多 2 层）**。便携版（配置在 `<TS3>\config`）和标准安装（配置在 `%APPDATA%\TS3Client`）都支持。
 - **自动识别客户端位数**：读客户端 exe 的 PE 头，64 位装 `ts3_speaking_overlay_win64.dll`（API 26），32 位装 `ts3_speaking_overlay_win32.dll`（API 25）。
 - **找不到时不用慌**：点界面上的「手动选择目录…」，选 TS3 的安装目录或 `config` 目录都行——三种都能识别：
-  - 选了 `D:\teamspeak`（下面有 `config\`）→ 便携版
-  - 选了 `D:\teamspeak\config`（下面有 `plugins\`）→ 直接当配置目录
-  - 选了 `D:\teamspeak\config\plugins` → 自动往上取一级
+  - 选了 `C:\TeamSpeak3`（下面有 `config\`）→ 便携版
+  - 选了 `C:\TeamSpeak3\config`（下面有 `plugins\`）→ 直接当配置目录
+  - 选了 `C:\TeamSpeak3\config\plugins` → 自动往上取一级
 - 自动关掉 TS3 → 装 DLL → 备份 `addons.ini` 为 `addons.ini.ts3ovl.bak` → 写入注册项 → 重新启动 TS3。
 - 界面里有「安装 / 卸载 / 手动选择目录… / 仅重启 TS3 / 关闭」，卸载会删 DLL 并清掉注册项。
 - 安装完成后浮窗默认**只在游戏内出现**，先在游戏里，或按 `插件(P) → Speaking Overlay → 仅游戏内显示` 关掉它就能在桌面看到。
