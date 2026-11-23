@@ -27,6 +27,7 @@ PLUGINS_EXPORTDLL void        ts3plugin_shutdown();
 
 /* Optional functions */
 PLUGINS_EXPORTDLL int         ts3plugin_offersConfigure();
+PLUGINS_EXPORTDLL void        ts3plugin_configure(void* handle, void* qParentWidget);
 PLUGINS_EXPORTDLL void        ts3plugin_registerPluginID(const char* id);
 PLUGINS_EXPORTDLL int         ts3plugin_requestAutoload();
 PLUGINS_EXPORTDLL void        ts3plugin_initMenus(struct PluginMenuItem*** menuItems, char** menuIcon);

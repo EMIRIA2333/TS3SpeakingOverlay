@@ -55,6 +55,10 @@ bool OverlayOnlyInGameEnabled();/* the "only in game" switch                 */
  * not a game (only meaningful when "only in game" is enabled). */
 bool OverlayHiddenByForeground();
 
+/* Persist the two switch values that have no other write path (locked and
+ * onlyInGame). Safe to call from any thread; used by the settings window. */
+void OverlaySaveSettings();
+
 /* True when the overlay is currently shown (nobody talking -> false). */
 bool OverlayIsShowing();
 

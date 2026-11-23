@@ -2,13 +2,14 @@
 
 [English](README.en.md) | **简体中文**
 
-一个 TeamSpeak 3 客户端插件：像 KOOK 那样，在屏幕上层用悬浮窗实时显示**当前频道里的所有人**——正在说话的人高亮并带呼吸绿环，没说话的人保持原位但**变暗**，不会整块消失。
+一个 TeamSpeak 3 客户端插件：像 KOOK 那样，在屏幕上层用悬浮窗实时显示**当前频道里的所有人**——正在说话的人高亮并带呼吸绿环，没说话的人保持原位但**变暗**，不会整块消失。浮窗**背景透明**，只留一圈圆角边框。
 
 ![悬浮窗效果](docs/overlay.png)
 
 ## 特性
 
 - **悬浮在最上层**：`WS_EX_TOPMOST | WS_EX_LAYERED`，游戏全屏窗口化、浏览器、播放器上都能显示。
+- **背景透明**：只画一圈圆角边框（深色光晕 + 白色描边），不填背景，游戏画面完全透出；昵称带 1px 黑色描边保证在亮背景上也能读清。
 - **显示自己频道里的所有人**：用 `getChannelClientList` 取本频道成员；说话的人高亮 + 呼吸绿环，其余人**变暗但保留在原位**（KOOK 的行为），图标不会因为没人说话而突然消失。
 - **头像 + 昵称**：通过 `ts3Functions.getAvatar()` 取客户端头像并裁成圆形；没有头像时退化成"首字彩色圆盘"。
 - **支持 emoji 昵称**：昵称文字走 Direct2D + DirectWrite 彩色字体渲染，😂🎮👍❤️ 等 emoji 正常显示（GDI+ 没有字体回退，会把 emoji 画成空框）。
@@ -77,15 +78,28 @@ TS3SpeakingOverlay-Setup.exe /silent /uninstall
 | 仅游戏内显示：开/关 | 开启后只有前台是游戏时才出现（默认开启） |
 | 锁定/解锁浮窗位置 | 锁定后鼠标穿透，点击直接落到下面的游戏/程序 |
 | 重置浮窗位置 | 回到屏幕右侧居中 |
-| 查看当前状态… | 在 TS3 当前服务器标签页打印一行实时状态 |
+| 打开设置（查看/切换全部开关）… | 打开设置窗口，一眼看到每个开关当前是开还是关 |
 
-`查看当前状态…` 输出示例：
+### 设置窗口：直接看到每个开关的状态
 
-```
-[Speaking Overlay] 浮窗开关=开  仅游戏内显示=开  位置锁定=未锁定  当前可见=否（被『仅游戏内显示』隐藏）
-```
+TS3 的 `PluginMenuItem` 结构体**没有 checked/勾选字段**，客户端**每个进程只调用一次** `ts3plugin_initMenus`（打开菜单不会重新调用），而且菜单数组在 `initMenus` 返回后立刻被 `ts3plugin_freeMemory` 释放（事后改写 `item->text` 是 use-after-free，会直接崩溃客户端）。所以原生菜单项**永远无法显示实时开关状态**。
+
+因此本插件改用客户端提供的正规入口 —— 插件设置窗口（`ts3plugin_offersConfigure` 返回 `PLUGIN_OFFERS_CONFIGURE_NEW_THREAD` + 实现 `ts3plugin_configure`），有两个打开方式：
+
+- **插件(P) → Speaking Overlay → 打开设置（查看/切换全部开关）…**
+- **设置 → 附加组件 → 选中 Speaking Overlay → 设置**
+
+![设置窗口](docs/settings.png)
+
+窗口里三个复选框始终反映真实状态，勾/取消立刻生效并写入 `overlay.ini`；底部状态行还会告诉你浮窗当前是否真的在屏幕上（以及是否正被「仅游戏内显示」挡着）。窗口每秒自动同步一次，即使状态是从菜单改的也会跟着更新。
+
+> 菜单里的前 4 项依旧可以随时切换，只是它们的**文字是固定的动作描述**，状态请看设置窗口。
 
 **拖动 + 吸附**：解锁状态下直接用左键拖悬浮窗即可，松手时如果距屏幕边缘 36px 以内会自动贴边对齐，位置保存到 `overlay.ini`（在插件目录，`[overlay]` 段落里的 `x` / `y` / `locked` / `onlyInGame`）。
+
+### 外观：背景透明，只留圆角边框
+
+浮窗**不画背景填充**，只有一圈圆角边框（外层深色光晕 + 内层白色描边），所以游戏画面完全透出来，不会挡住视野。为了让透明背景上的白字始终可读，昵称文字额外画了一层 1px 黑色描边（Direct2D 双层绘制）。
 
 ### "只在游戏内显示"是怎么判定的
 
@@ -141,11 +155,14 @@ TS3SpeakingOverlay-Setup.exe /silent /uninstall
 | --- | --- |
 | `src/plugin.cpp` | TS3 插件主体：导出符号、事件回调、频道成员列表、头像/昵称缓存、菜单 |
 | `src/plugin.h` | `PLUGINS_EXPORTDLL` 声明（API 26 要求的全部导出） |
-| `src/overlay.cpp` | 悬浮窗：分层窗口 + GDI+ 每像素 alpha、Direct2D 文字层、布局、绘制、变暗、拖动、持久化 |
-| `src/overlay.h` | 悬浮窗对外接口（`OverlayStart` / `OverlaySetEntries` / ...） |
+| `src/overlay.cpp` | 悬浮窗：分层窗口 + GDI+ 每像素 alpha、透明背景 + 圆角边框、Direct2D 文字层、布局、绘制、变暗、拖动、吸附、持久化 |
+| `src/overlay.h` | 悬浮窗对外接口（`OverlayStart` / `OverlaySetEntries` / 状态查询 / `OverlaySaveSettings` / ...） |
+| `src/settings.cpp` | 设置窗口：三个复选框实时反映开关状态，每秒自动同步（`ts3plugin_configure` 的 UI） |
+| `src/settings.h` | 设置窗口接口（`SettingsShow` 模态 / `SettingsShowAsync` 另起线程 / `SettingsClose`） |
 | `src/test_overlay.cpp` | 独立预览程序，塞 4 个假说话人 |
 | `src/test_gamedetect.cpp` | 前台窗口探测器，调用浮窗同一份判定逻辑 |
 | `src/test_fakegame.cpp` | 假游戏窗口（无边框全屏），验证游戏闸门 |
+| `src/test_settings.cpp` | 单独跑设置窗口的 harness（不开 TS3 也能看界面） |
 | `installer/setup.cpp` | 一键安装器主体（Win32 GUI，查找 TS3 / 装卸 / 静默开关） |
 | `installer/setup.rc` / `setup.manifest` / `res.h` | 安装器资源：图标、内嵌双 DLL 载荷、manifest、版本信息 |
 | `installer/make_ico.py` | 由 PNG 帧生成多尺寸 `.ico` |
@@ -166,8 +183,18 @@ TS3SpeakingOverlay-Setup.exe /silent /uninstall
   释放那个数组（实测日志里是 `initMenus: 5 global items created` 紧跟 `freeMemory: client
   released the MENU ARRAY`）。所以**不能**留着 `PluginMenuItem**` 事后改 `item->text` 来刷新勾选
   状态——那是 use-after-free，点一下菜单 TS3 直接崩。SDK 的 `PluginMenuItem` 也根本没有
-  `checked` 字段，客户端不画勾。本插件改成固定的「A/B」式文案 + 一个「查看当前状态…」菜单项，
-  用 `printMessageToCurrentTab` 把实时状态打到聊天区。
+  `checked` 字段，客户端不画勾；实测客户端**每个进程只调用一次** `ts3plugin_initMenus`（打开菜单
+  不会重入），`setPluginMenuEnabled` 这个函数在 3.6.2 客户端二进制里甚至**不存在**。
+  → 结论：原生菜单不可能显示实时状态。本插件改用 `ts3plugin_offersConfigure` +
+  `ts3plugin_configure` 打开一个真正的设置窗口（三个复选框，每秒自动同步），菜单里保留一个
+  「打开设置…」入口。
+- **`ts3plugin_configure` 里必须自己跑消息循环**：返回 `PLUGIN_OFFERS_CONFIGURE_NEW_THREAD`
+  后客户端在调用线程里**阻塞等待** configure 返回，所以窗口是模态地在这个线程里 pump
+  `GetMessage`；`WM_CLOSE` 必须真的 `DestroyWindow`（只 hide 会让 configure 永久阻塞）。
+  另外 `qParentWidget` 传的是 Qt 的 `QWidget*`、**不是 HWND**，直接当 `CreateWindowExW` 的父窗口
+  会让创建失败，一律建成顶层窗口再自己居中。
+- **从菜单里开设置窗口不能阻塞**：菜单事件跑在客户端 Qt GUI 线程上，在那里跑模态循环会冻结
+  TS3，所以 `SettingsShowAsync()` 另起一个线程去 `SettingsShow()`。
 - **不能依赖 UCRT apiset**。默认 MinGW-w64（UCRT 版）产出的 DLL 导入表里有 10 个
   `api-ms-win-crt-*.dll`，其中 `api-ms-win-crt-private-l1-1-0.dll` 属于 UCRT 私有 apiset，
   在没装 Universal CRT 更新的 Win7/8 或精简系统上缺失，`LoadLibrary` 失败（错误 126），

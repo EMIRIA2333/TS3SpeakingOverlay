@@ -64,9 +64,14 @@ const int   kMaxRows         = 12;   /* hard cap on simultaneously shown   */
 const int   kSnapDist        = 36;   /* edge snap distance on drag release */
 
 /* colours (ARGB) */
-const ARGB  kPanelTop        = 0xF01E1F26; /* background gradient top       */
-const ARGB  kPanelBottom     = 0xF016171D; /* background gradient bottom    */
-const ARGB  kBorder          = 0x33FFFFFF;
+/* The panel background is fully transparent by request: only the rounded
+ * frame is drawn, so whatever is behind the overlay stays visible. The border
+ * is therefore a bit stronger than it used to be - against a bright game it
+ * still has to read as a frame. */
+const ARGB  kBorder          = 0x88FFFFFF;
+/* Dark halo drawn under the border so the frame stays visible on light
+ * backgrounds (the panel background itself is fully transparent). */
+const ARGB  kPanelHalo       = 0x70000000;
 const ARGB  kRingActive      = 0xFF37C26A; /* KOOK-ish speaking green       */
 const ARGB  kRingIdle        = 0x00FFFFFF;
 const ARGB  kText            = 0xFFFFFFFF;
@@ -126,6 +131,8 @@ ID2D1Factory*          g_d2d      = NULL;
 ID2D1DCRenderTarget*   g_d2dRt    = NULL;
 ID2D1SolidColorBrush*  g_d2dText  = NULL;
 ID2D1SolidColorBrush*  g_d2dDim   = NULL;   /* names of members not talking */
+ID2D1SolidColorBrush*  g_d2dShadow    = NULL;  /* 1px outline behind names   */
+ID2D1SolidColorBrush*  g_d2dShadowDim = NULL;
 IDWriteFactory*        g_dw       = NULL;
 IDWriteTextFormat*     g_dwFormat = NULL;
 int                    g_d2dDpi   = 0;   /* dpi the text format was built for */
@@ -400,6 +407,8 @@ void TeardownTextEngine()
     if (g_dwFormat) { g_dwFormat->Release(); g_dwFormat = NULL; }
     if (g_d2dText)  { g_d2dText->Release();  g_d2dText  = NULL; }
     if (g_d2dDim)   { g_d2dDim->Release();   g_d2dDim   = NULL; }
+    if (g_d2dShadow)    { g_d2dShadow->Release();    g_d2dShadow    = NULL; }
+    if (g_d2dShadowDim) { g_d2dShadowDim->Release(); g_d2dShadowDim = NULL; }
     if (g_dw)       { g_dw->Release();       g_dw       = NULL; }
     if (g_d2dRt)    { g_d2dRt->Release();    g_d2dRt    = NULL; }
     if (g_d2d)      { g_d2d->Release();      g_d2d      = NULL; }
@@ -511,6 +520,22 @@ void DrawNamesD2D(HDC memDc, int w, int h,
             return;
         }
     }
+    /* With the panel background gone the white names sit directly on whatever
+     * the game renders, so they need a dark 1px outline to stay readable on
+     * bright scenes. It is the same glyph drawn once in near-black, offset. */
+    if (!g_d2dShadow) {
+        if (FAILED(g_d2dRt->CreateSolidColorBrush(D2D1::ColorF(0.0f, 0.0f, 0.0f, 0.75f),
+                                                  &g_d2dShadow)) || !g_d2dShadow) {
+            return;
+        }
+    }
+    if (!g_d2dShadowDim) {
+        const float d = (float)kDimAlpha / 255.0f * 0.75f;
+        if (FAILED(g_d2dRt->CreateSolidColorBrush(D2D1::ColorF(0.0f, 0.0f, 0.0f, d),
+                                                  &g_d2dShadowDim)) || !g_d2dShadowDim) {
+            return;
+        }
+    }
     int dpi = g_d2dDpi > 0 ? g_d2dDpi : 96;
     g_d2dRt->BeginDraw();
     for (size_t i = 0; i < entries.size(); ++i) {
@@ -519,6 +544,14 @@ void DrawNamesD2D(HDC memDc, int w, int h,
         float textX  = Px2Dip(L.padX + L.avatarSize + L.gap, dpi);
         /* +2px slack so the trailing glyph is not clipped by rounding */
         float textW  = Px2Dip(L.nameWidth + 2, dpi);
+        const float off = Px2Dip(1, dpi);
+        D2D1_RECT_F rs = D2D1::RectF(textX + off, rowTop + off,
+                                     textX + textW + off, rowTop + rowH + off);
+        g_d2dRt->DrawTextW(entries[i].name.c_str(), (UINT32)entries[i].name.size(),
+                           g_dwFormat, &rs,
+                           entries[i].talking ? g_d2dShadow : g_d2dShadowDim,
+                           D2D1_DRAW_TEXT_OPTIONS_ENABLE_COLOR_FONT,
+                           DWRITE_MEASURING_MODE_NATURAL);
         D2D1_RECT_F r = D2D1::RectF(textX, rowTop, textX + textW, rowTop + rowH);
         g_d2dRt->DrawTextW(entries[i].name.c_str(), (UINT32)entries[i].name.size(),
                            g_dwFormat, &r,
@@ -822,16 +855,24 @@ void Paint(HWND hwnd)
     g.SetTextRenderingHint(TextRenderingHintAntiAliasGridFit);
     g.SetPixelOffsetMode(PixelOffsetModeHalf);
 
-    /* panel background */
+    /* Panel frame only - the background is transparent on purpose.
+     *
+     * A single light stroke vanishes on bright game scenes, so the frame is
+     * drawn twice: first a 3px black halo (readable on white), then a 1px
+     * white line on top (readable on black). The result works on any
+     * background without tinting what is behind the panel. */
     {
         GraphicsPath panel;
-        AddRoundedRect(panel, RectF(0.5f, 0.5f, (float)g_width - 1.0f, (float)g_height - 1.0f),
+        AddRoundedRect(panel, RectF(1.5f, 1.5f, (float)g_width - 3.0f, (float)g_height - 3.0f),
                        (float)L.radius);
-        LinearGradientBrush bg(PointF(0, 0), PointF(0, (float)g_height),
-                               Color(kPanelTop), Color(kPanelBottom));
-        g.FillPath(&bg, &panel);
+        Pen halo{Color(kPanelHalo), 3.0f};
+        g.DrawPath(&halo, &panel);
+
+        GraphicsPath panel2;
+        AddRoundedRect(panel2, RectF(0.5f, 0.5f, (float)g_width - 1.0f, (float)g_height - 1.0f),
+                       (float)L.radius);
         Pen border{Color(kBorder), 1.0f};
-        g.DrawPath(&border, &panel);
+        g.DrawPath(&border, &panel2);
     }
 
     /* rows */
@@ -1220,6 +1261,20 @@ void OverlayToggleOnlyInGame()
         KillTimer(g_hwnd, kTimerRedraw);
         SetTimer(g_hwnd, kTimerRedraw, 1, NULL);
     }
+}
+
+void OverlaySaveSettings()
+{
+    /* Called from the settings window, i.e. NOT from the overlay thread, so the
+     * switches have to be read under the lock instead of using SavePosition(). */
+    bool locked, onlyInGame;
+    {
+        std::lock_guard<std::mutex> lk(g_shared.lock);
+        locked     = g_shared.locked;
+        onlyInGame = g_shared.onlyInGame;
+    }
+    IniSet(L"locked", locked ? 1 : 0);
+    IniSet(L"onlyInGame", onlyInGame ? 1 : 0);
 }
 
 bool OverlayHiddenByForeground()

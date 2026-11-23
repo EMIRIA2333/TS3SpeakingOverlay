@@ -30,6 +30,7 @@
 
 #include "plugin.h"
 #include "overlay.h"
+#include "settings.h"
 
 /* TS3 3.6.x (64-bit client) requires API 26. Older 32-bit clients (3.5.x and
  * earlier) require 25/24 and refuse anything newer, so the value is
@@ -340,6 +341,7 @@ void ts3plugin_shutdown()
         g_avatarAsked.clear();
         }
     }
+    ts3ovl::SettingsClose();
     ts3ovl::OverlayStop();
 
     if (pluginID) {
@@ -354,7 +356,20 @@ void ts3plugin_shutdown()
 int ts3plugin_offersConfigure()
 {
     Log("offersConfigure called");
-    return PLUGIN_OFFERS_NO_CONFIGURE;
+    /* The plugin menu cannot show live switch states (the client calls
+     * ts3plugin_initMenus once per process and then frees the menu array), so
+     * the switches are offered through a real settings window instead, which
+     * the client shows under Options -> Addons -> Settings. */
+    return PLUGIN_OFFERS_CONFIGURE_NEW_THREAD;
+}
+
+void ts3plugin_configure(void* handle, void* qParentWidget)
+{
+    char msg[256];
+    snprintf(msg, sizeof(msg), "configure called: handle=%p qParentWidget=%p",
+             handle, qParentWidget);
+    Log(msg);
+    ts3ovl::SettingsShow(qParentWidget);
 }
 
 void ts3plugin_registerPluginID(const char* id)
@@ -392,7 +407,7 @@ static const char* const kMenuTexts[5] = {
     "仅游戏内显示：开/关",                                                          /* 1 */
     "锁定/解锁浮窗位置",                                                            /* 2 */
     "重置浮窗位置",                                                                 /* 3 */
-    "查看当前状态…",                                                                /* 4 */
+    "打开设置（查看/切换全部开关）…",                                                /* 4 */
 };
 
 /* Filled in by ts3plugin_initMenus (defined below the menu captions) and
@@ -481,26 +496,11 @@ void ts3plugin_onMenuItemEvent(uint64 serverConnectionHandlerID, enum PluginMenu
         ts3ovl::OverlayResetPosition();
         break;
     case MENU_ID_SHOW_STATE: {
-        /* Print the live states into the current server tab. This is the only
-         * safe way to surface them: the menu structs are already freed by the
-         * client, and the SDK has no checked-menu or menu-text-update API. */
-        const bool visible    = ts3ovl::OverlayVisibleEnabled();
-        const bool onlyInGame = ts3ovl::OverlayOnlyInGameEnabled();
-        const bool locked     = ts3ovl::OverlayIsLocked();
-        const bool showing    = ts3ovl::OverlayIsShowing();
-        const bool hiddenByFg = ts3ovl::OverlayHiddenByForeground();
-
-        char msg[512];
-        snprintf(msg, sizeof(msg),
-                 "[Speaking Overlay] 浮窗开关=%s  仅游戏内显示=%s  位置锁定=%s  "
-                 "当前可见=%s%s",
-                 visible ? "开" : "关",
-                 onlyInGame ? "开" : "关",
-                 locked ? "已锁定" : "未锁定",
-                 showing ? "是" : "否",
-                 (!showing && hiddenByFg) ? "（被『仅游戏内显示』隐藏）" : "");
-        if (ts3Functions.printMessageToCurrentTab) ts3Functions.printMessageToCurrentTab(msg);
-        Log(msg);
+        /* Opens the settings window: it is the only place where the live
+         * switch states can be shown, because the menu structs are already
+         * freed by the client and the SDK has no checked-menu API. The window
+         * runs on its own thread so this handler returns immediately. */
+        ts3ovl::SettingsShowAsync();
         break;
     }
     }

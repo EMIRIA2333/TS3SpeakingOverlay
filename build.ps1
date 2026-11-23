@@ -95,7 +95,9 @@ function Build-Plugin {
     $a += $inc
     $a += $commonDefs
     $a += @('-DPLUGIN_API_VERSION=' + $ApiVersion)
-    $a += @((Join-Path $BuildRoot 'src\plugin.cpp'), (Join-Path $BuildRoot 'src\overlay.cpp'))
+    $a += @((Join-Path $BuildRoot 'src\plugin.cpp'),
+            (Join-Path $BuildRoot 'src\overlay.cpp'),
+            (Join-Path $BuildRoot 'src\settings.cpp'))
     $a += $libs
 
     Write-Host ("compiling [$Label, API $ApiVersion] -> $Out")

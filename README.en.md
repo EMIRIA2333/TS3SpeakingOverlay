@@ -5,7 +5,8 @@
 A TeamSpeak 3 client plugin that shows **everyone in your current channel** in a
 floating, always-on-top overlay — the way KOOK does it. Whoever is talking is
 highlighted with a pulsing green ring; everyone else stays in place but is
-**dimmed**, so the panel never blinks in and out of existence.
+**dimmed**, so the panel never blinks in and out of existence. The overlay has a
+**transparent background** with just a rounded frame around it.
 
 ![overlay](docs/overlay.png)
 
@@ -13,6 +14,9 @@ highlighted with a pulsing green ring; everyone else stays in place but is
 
 - **Always on top**: `WS_EX_TOPMOST | WS_EX_LAYERED`, so it shows over games in
   borderless/fullscreen-windowed mode, browsers and players.
+- **Transparent background**: only a rounded frame is drawn (dark halo + white
+  stroke), the game shows through completely; nicknames get a 1 px black shadow so
+  they stay readable on bright scenes.
 - **The whole channel**: members come from `getChannelClientList`. Speakers are
   highlighted with a pulsing green ring, the rest are **dimmed but keep their
   slot** (KOOK behaviour) — icons do not vanish when nobody talks.
@@ -121,18 +125,45 @@ Plugin menu (the **Plugins(P)** menu of TS3):
 | 仅游戏内显示：开/关 (Only while gaming) | When on, the overlay only appears while a game is in the foreground (default: on) |
 | 锁定/解锁浮窗位置 (Lock position) | When locked the overlay is click-through, clicks land in the game below |
 | 重置浮窗位置 (Reset position) | Back to the right edge, vertically centred |
-| 查看当前状态… (Show current state) | Prints one line of live state into the current TS3 server tab |
+| 打开设置（查看/切换全部开关）… (Open settings) | Opens the settings window, which always shows whether each switch is on or off |
 
-Example output of *Show current state*:
+### Settings window: seeing every switch state at a glance
 
-```
-[Speaking Overlay] 浮窗开关=开  仅游戏内显示=开  位置锁定=未锁定  当前可见=否（被『仅游戏内显示』隐藏）
-```
+TS3's `PluginMenuItem` struct has **no checked/state field**, the client calls
+`ts3plugin_initMenus` **exactly once per process** (opening the menu does not
+call it again) and it frees the menu array through `ts3plugin_freeMemory`
+immediately afterwards — writing to `item->text` later is a use-after-free and
+crashes the client. A native menu item therefore **can never show live states**.
+
+The plugin uses the client's real configuration entry point instead
+(`ts3plugin_offersConfigure` returns `PLUGIN_OFFERS_CONFIGURE_NEW_THREAD` plus a
+`ts3plugin_configure` implementation). Two ways to open it:
+
+- **Plugins(P) → Speaking Overlay → 打开设置（查看/切换全部开关）…**
+- **Settings → Addons → select Speaking Overlay → Settings**
+
+![settings window](docs/settings.png)
+
+The three checkboxes always mirror the real state; toggling one takes effect
+immediately and is written to `overlay.ini`. The status line at the bottom also
+tells you whether the overlay is actually on screen right now (and whether it is
+being hidden by "only while gaming"). The window re-syncs once per second, so it
+also follows changes made from the menu.
+
+> The first four menu items still toggle things at any time — their captions are
+> fixed action labels, so look at the settings window for the current state.
 
 **Drag + snap**: while unlocked just drag the overlay with the left button.
 Releasing within 36 px of a screen edge snaps it to that edge. Position is stored
 in `overlay.ini` (plugin folder, `[overlay]` section: `x`, `y`, `locked`,
 `onlyInGame`).
+
+### Look: transparent background, rounded frame only
+
+The overlay draws **no background fill** — just a rounded frame (an outer dark
+halo plus an inner white stroke), so the game shows through completely and never
+gets blocked. To keep the white nicknames readable on bright scenes every name is
+drawn twice in Direct2D: a 1 px near-black shadow, then the main text.
 
 ### How "only while gaming" is decided
 
@@ -207,11 +238,14 @@ the client folder or the config folder:
 | --- | --- |
 | `src/plugin.cpp` | Plugin core: exported symbols, event callbacks, channel member list, name/avatar caches, menus |
 | `src/plugin.h` | `PLUGINS_EXPORTDLL` declarations (every export the API requires) |
-| `src/overlay.cpp` | The overlay: layered window with GDI+ per-pixel alpha, Direct2D text pass, layout, painting, dimming, dragging, persistence |
-| `src/overlay.h` | Public overlay interface (`OverlayStart` / `OverlaySetEntries` / …) |
+| `src/overlay.cpp` | The overlay: layered window with GDI+ per-pixel alpha, transparent background + rounded frame, Direct2D text pass, layout, painting, dimming, dragging, snapping, persistence |
+| `src/overlay.h` | Public overlay interface (`OverlayStart` / `OverlaySetEntries` / state queries / `OverlaySaveSettings` / …) |
+| `src/settings.cpp` | Settings window: three checkboxes mirroring the real switch states, re-synced every second (the UI behind `ts3plugin_configure`) |
+| `src/settings.h` | Settings interface (`SettingsShow` modal / `SettingsShowAsync` on its own thread / `SettingsClose`) |
 | `src/test_overlay.cpp` | Standalone preview harness with 4 fake speakers |
 | `src/test_gamedetect.cpp` | Foreground-window probe reusing the overlay's detection logic |
 | `src/test_fakegame.cpp` | Fake borderless-fullscreen game window to verify the gate |
+| `src/test_settings.cpp` | Harness that runs the settings window on its own, without TS3 |
 | `installer/setup.cpp` | The one-click installer (Win32 GUI: locate TS3, install/uninstall, silent flags) |
 | `installer/setup.rc` / `setup.manifest` / `res.h` | Installer resources: icon, both embedded DLL payloads, manifest, version info |
 | `installer/make_ico.py` | Builds the multi-size `.ico` from PNG frames |
@@ -244,10 +278,23 @@ the client folder or the config folder:
   `freeMemory: client released the MENU ARRAY`). So you must **not** keep the
   `PluginMenuItem**` around and rewrite `item->text` later to show checkmarks —
   that is a use-after-free and crashes TS3 the moment you click the menu. SDK's
-  `PluginMenuItem` has no `checked` field either, and the client draws no
-  checkmark. This plugin uses fixed `A/B` captions plus a *Show current state*
-  item that prints the live state into the chat tab via
-  `printMessageToCurrentTab`.
+  `PluginMenuItem` has no `checked` field either, the client draws no checkmark,
+  it calls `ts3plugin_initMenus` **once per process only** (opening the menu does
+  not call it again), and `setPluginMenuEnabled` does not even exist in the 3.6.2
+  client binary. Conclusion: a native menu can never show live state. This plugin
+  therefore uses `ts3plugin_offersConfigure` + `ts3plugin_configure` for a real
+  settings window (three checkboxes, re-synced every second) and keeps one *Open
+  settings…* item in the menu.
+- **`ts3plugin_configure` must run its own message loop.** With
+  `PLUGIN_OFFERS_CONFIGURE_NEW_THREAD` the client **blocks** in that call until it
+  returns, so the window pumps `GetMessage` modally on that thread, and `WM_CLOSE`
+  must really `DestroyWindow` (merely hiding it blocks configure forever). Also,
+  `qParentWidget` is a Qt `QWidget*`, **not an HWND** — passing it as the parent of
+  `CreateWindowExW` makes creation fail, so the window is always top-level and
+  centres itself.
+- **Opening the settings window from the menu must not block.** Menu events run on
+  the client's Qt GUI thread, where a modal loop would freeze TS3, so
+  `SettingsShowAsync()` starts the modal `SettingsShow()` on a private thread.
 - **Do not depend on UCRT apisets.** A DLL built with the default (UCRT) MinGW
   imports ten `api-ms-win-crt-*.dll` entries, among them
   `api-ms-win-crt-private-l1-1-0.dll`, a private UCRT apiset that is missing on
