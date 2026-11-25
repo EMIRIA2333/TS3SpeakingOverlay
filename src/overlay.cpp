@@ -117,6 +117,13 @@ POINT         g_dragOrigin = {0, 0};
 int           g_dragStartX = 0;
 int           g_dragStartY = 0;
 
+/* z-order bookkeeping: re-asserting topmost on every frame would fight the
+ * game's own window management, so it only happens when it can actually have
+ * changed - see the comment in Paint(). */
+HWND          g_lastForeground = NULL;
+DWORD         g_lastTopmostAt  = 0;
+bool          g_wasVisible     = false;
+
 /* cached fonts / brushes, rebuilt on DPI change */
 Font*         g_fontName    = NULL;
 Font*         g_fontStatus  = NULL;
@@ -814,6 +821,7 @@ void Paint(HWND hwnd)
         /* nothing to show -> hide the window entirely */
         if (IsWindowVisible(hwnd)) ShowWindow(hwnd, SW_HIDE);
         g_width = g_height = 0;
+        g_wasVisible = false;   /* next show must re-assert topmost */
         return;
     }
     bool wantVisible;
@@ -829,6 +837,7 @@ void Paint(HWND hwnd)
         Dbg(L"[paint] only-in-game set, foreground is not a game -> hide");
         if (IsWindowVisible(hwnd)) ShowWindow(hwnd, SW_HIDE);
         g_width = g_height = 0;
+        g_wasVisible = false;   /* next show must re-assert topmost */
         return;
     }
     if (wantVisible) {
@@ -845,6 +854,46 @@ void Paint(HWND hwnd)
         g_width  = newW;
         g_height = newH;
     }
+
+    /* Re-assert the topmost band, but only when it can actually have changed.
+     *
+     * A window created with WS_EX_TOPMOST does NOT stay above everything
+     * forever: when a fullscreen or borderless-fullscreen game is activated
+     * Windows promotes it above the topmost band and our panel silently ends
+     * up underneath it. Measured with CS2 (borderless fullscreen, SDL_app):
+     * the overlay sat at z=288 while cs2 was z=434 - IsWindowVisible() still
+     * returned TRUE, the layered surface still held pixels and a PrintWindow
+     * snapshot of the window looked perfect, yet nothing was on screen. After
+     * a client restart the z-order happened to be the other way round (20 vs
+     * 34) and the very same binary displayed fine, which is why this only
+     * shows up some of the time.
+     *
+     * Calling SetWindowPos on every paint (up to 25 fps) works but makes the
+     * panel flicker against games that keep re-ordering their own window, so
+     * it is done only when the foreground window changed, when we just became
+     * visible, or as a 1 Hz safety net. SWP_NOACTIVATE keeps the game focused
+     * and SWP_NOOWNERZORDER keeps owned windows untouched. */
+    if (wantVisible) {
+        HWND fg = GetForegroundWindow();
+        DWORD now = GetTickCount();
+        bool becameVisible = !g_wasVisible;
+        bool fgChanged     = (fg != g_lastForeground);
+        bool stale         = (DWORD)(now - g_lastTopmostAt) > 1000;
+
+        LONG_PTR ex = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
+        if (!(ex & WS_EX_TOPMOST)) {
+            SetWindowLongPtrW(hwnd, GWL_EXSTYLE, ex | WS_EX_TOPMOST);
+            Dbg(L"[paint] WS_EX_TOPMOST was missing -> restored");
+            becameVisible = true;   /* force the reposition below */
+        }
+        if (becameVisible || fgChanged || stale) {
+            SetWindowPos(hwnd, HWND_TOPMOST, 0, 0, 0, 0,
+                         SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOOWNERZORDER);
+            g_lastForeground = fg;
+            g_lastTopmostAt  = now;
+        }
+    }
+    g_wasVisible = wantVisible && IsWindowVisible(hwnd);
 
     /* offscreen ARGB surface */
     Bitmap bmp(g_width, g_height, PixelFormat32bppPARGB);

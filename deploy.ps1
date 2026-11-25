@@ -7,7 +7,7 @@
 # Usage:
 #   .\deploy.ps1 -Ts3Dir 'C:\Program Files\TeamSpeak 3 Client'
 #   .\deploy.ps1 -Ts3Dir "$env:APPDATA\TS3Client"          # config dir variant
-#   .\deploy.ps1 -Ts3Dir 'D:\teamspeak' -BuildDir 'D:\build'
+#   .\deploy.ps1 -Ts3Dir 'C:\TeamSpeak3' -BuildDir 'D:\build'
 #
 # -Ts3Dir may point at either the client folder (contains ts3client_win64.exe
 # and config\) or the config folder itself (contains plugins\ and addons.ini).

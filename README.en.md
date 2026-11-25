@@ -46,7 +46,7 @@ highlighted with a pulsing green ring; everyone else stays in place but is
 ## One-click install (recommended)
 
 Download `TS3SpeakingOverlay-Setup.exe` from the
-[latest release](https://github.com/EMIRIA2333/TS3SpeakingOverlay/releases/latest)
+[latest release](../../releases/latest)
 and run it. It is a **single file with both plugin DLLs embedded** and needs **no
 runtime redistributable** (statically linked with MinGW; the only runtime import
 is the system's own `msvcrt.dll`).
@@ -259,6 +259,22 @@ the client folder or the config folder:
   called. Otherwise ULW reads the DC's 1×1 monochrome stock bitmap, returns
   `ERROR_GEN_FAILURE (31)` and the window never appears — the single biggest trap
   in this project.
+- **`WS_EX_TOPMOST` is not permanent — the overlay has to reclaim the z-order.**
+  When a fullscreen or borderless-fullscreen game is activated, Windows promotes
+  it *above* the topmost band and the panel ends up underneath it. Measured with
+  CS2 (`SDL_app`, borderless fullscreen): the overlay sat at `z=288` while cs2 was
+  at `z=434` — `IsWindowVisible()` still returned `TRUE`, the layered surface
+  still held pixels, a snapshot of the window itself looked perfect, and yet
+  nothing was on screen. After restarting the client the z-order happened to be
+  the other way round (`20` vs `34`) and the very same binary displayed fine,
+  which is why this bug only shows up sometimes and is easily mistaken for a
+  rendering problem. Fix: `Paint()` calls `SetWindowPos(hwnd, HWND_TOPMOST, …,
+  SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOOWNERZORDER)` to put itself
+  back into the topmost band, restoring the `WS_EX_TOPMOST` bit if it was cleared.
+  To avoid fighting the game (25 `SetWindowPos` calls per second flicker against
+  a game that keeps re-ordering its own window) the call only happens when the
+  foreground window changed, when the overlay just became visible, or as a 1 Hz
+  safety net.
 - Click-through only works via `WS_EX_TRANSPARENT`. Returning `HTTRANSPARENT`
   from `WM_NCHITTEST` only forwards to windows of the *same thread* and never
   reaches the application underneath.

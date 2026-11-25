@@ -172,6 +172,15 @@ TS3 的 `PluginMenuItem` 结构体**没有 checked/勾选字段**，客户端**�
 
 - TS3 回调线程只更新一个 `std::mutex` 保护的快照，**渲染在独立线程**，GDI 卡顿不会拖住语音。
 - `UpdateLayeredWindow` 之前**必须保持 DIB 选中在内存 DC 里**，否则读到 1x1 单色位图，ULW 返回 `ERROR_GEN_FAILURE (31)`、窗口永不显示——这是本项目踩过的最大坑。
+- **`WS_EX_TOPMOST` 不是永久的，浮窗必须自己抢回 z 序**。全屏 / 无边框全屏游戏被激活时，Windows
+  会把它提到 topmost 带之上，我们的面板就被压到下面去了。CS2（`SDL_app`，无边框全屏）实测：
+  浮窗 `z=288`、cs2 `z=434`——`IsWindowVisible()` 仍然返回 `TRUE`，分层表面里也仍有像素，
+  对浮窗窗口本身截图完全正常，但屏幕上什么也看不见。而重启一次客户端后 z 序恰好相反
+  （`20` vs `34`），同一个二进制就正常显示了，所以这个问题是"有时候"才出现，极易误判成渲染 bug。
+  修法：`Paint()` 里用 `SetWindowPos(hwnd, HWND_TOPMOST, …, SWP_NOMOVE | SWP_NOSIZE |
+  SWP_NOACTIVATE | SWP_NOOWNERZORDER)` 把自己放回 topmost 带，`WS_EX_TOPMOST` 位被清掉时一并补回。
+  为了不跟游戏抢层级（每帧 25 次 `SetWindowPos` 会和游戏自己的窗口管理打架、造成闪烁），只在
+  **前台窗口变了 / 刚从隐藏变可见 / 每 1 秒兜底** 这三种情况下才真正调用。
 - 鼠标穿透只能靠 `WS_EX_TRANSPARENT`；`WM_NCHITTEST` 返回 `HTTRANSPARENT` 只在同线程窗口间有效，传不到下层程序。
 - 所有 GDI+ 对象都限制在内层作用域，`GdiplusShutdown()` 前必须先析构，否则必崩（0xC0000005）。
 - 菜单数组 `PluginMenuItem**` **必须以 NULL 结尾**，SDK 示例里的 `END_CREATE_MENUS` 就是干这个的。
