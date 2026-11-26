@@ -1,10 +1,15 @@
 /*
- * test_gamedetect.cpp - prints the foreground window plus the verdict that the
- * overlay's own game heuristic reaches for it. The heuristic is not copied: it
- * is called through ts3ovl::OverlayGameForegroundNow(), so this probe and the
- * overlay can never drift apart.
+ * test_gamedetect.cpp - shows what the new game detection decides.
  *
- * usage: test_gamedetect.exe [seconds]   (default: print once)
+ * Since 1.2.0 the overlay no longer looks at the foreground window at all: it
+ * shows up while any *enabled* entry of the game list is running. This probe
+ * therefore prints the list, which of those processes are alive right now, and
+ * the verdict the overlay itself would reach (OverlayGameForegroundNow() is a
+ * thin wrapper around GamesAnyRunning(), so probe and overlay cannot drift).
+ *
+ * usage: test_gamedetect.exe [seconds] [iniPath]
+ *        seconds  keep polling (default: print once)
+ *        iniPath  the overlay.ini holding [games] (default: alongside the exe)
  */
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
@@ -12,121 +17,116 @@
 #ifndef NOMINMAX
 #define NOMINMAX
 #endif
+#ifndef UNICODE
+#define UNICODE
+#endif
+#ifndef _UNICODE
+#define _UNICODE
+#endif
+
 #include <windows.h>
+#include <tlhelp32.h>
 #include <cwctype>
 #include <cstdio>
 #include <cstdlib>
 #include <string>
+#include <vector>
 
+#include "games.h"
 #include "overlay.h"
 
-static std::wstring ProcessExeName(DWORD pid)
+static std::string Narrow(const std::wstring& w)
 {
-    std::wstring result;
-    HANDLE h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
-    if (!h) return result;
+    if (w.empty()) return std::string();
+    const int n = WideCharToMultiByte(CP_UTF8, 0, w.c_str(), (int)w.size(), NULL, 0, NULL, NULL);
+    std::string s((size_t)n, '\0');
+    WideCharToMultiByte(CP_UTF8, 0, w.c_str(), (int)w.size(), &s[0], n, NULL, NULL);
+    return s;
+}
 
-    wchar_t path[MAX_PATH * 2] = {0};
-    DWORD len = (DWORD)(sizeof(path) / sizeof(path[0]));
-    if (QueryFullProcessImageNameW(h, 0, path, &len) && len > 0) {
-        const wchar_t* base = path;
-        for (const wchar_t* p = path; *p; ++p) {
-            if (*p == L'\\' || *p == L'/') base = p + 1;
-        }
-        for (const wchar_t* p = base; *p; ++p) result.push_back((wchar_t)towlower(*p));
+static std::wstring DefaultIni()
+{
+    wchar_t exe[MAX_PATH] = {0};
+    GetModuleFileNameW(NULL, exe, MAX_PATH);
+    std::wstring p(exe);
+    const size_t slash = p.find_last_of(L'\\');
+    if (slash != std::wstring::npos) p.resize(slash);
+    return p + L"\\test_gamedetect.ini";
+}
+
+/* Full process snapshot (lower-case exe names), so the probe can say which list
+ * entries are really alive instead of guessing from visible windows. */
+static void SnapshotNames(std::vector<std::wstring>* out)
+{
+    out->clear();
+    HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+    if (snap == INVALID_HANDLE_VALUE) return;
+    PROCESSENTRY32W pe;
+    ZeroMemory(&pe, sizeof(pe));
+    pe.dwSize = sizeof(pe);
+    if (Process32FirstW(snap, &pe)) {
+        do {
+            if (!pe.szExeFile[0]) continue;
+            std::wstring n(pe.szExeFile);
+            for (size_t i = 0; i < n.size(); ++i) n[i] = (wchar_t)towlower(n[i]);
+            out->push_back(n);
+        } while (Process32NextW(snap, &pe));
     }
-    CloseHandle(h);
-    return result;
+    CloseHandle(snap);
 }
 
-static void Report()
+static void Dump()
 {
-    HWND fg = GetForegroundWindow();
-    if (!fg) { printf("foreground: (none)\n"); return; }
+    const std::vector<ts3ovl::GameEntry> games = ts3ovl::GamesList();
+    std::vector<std::wstring> procs;
+    SnapshotNames(&procs);
 
-    wchar_t title[256] = {0};
-    GetWindowTextW(fg, title, 256);
-    wchar_t cls[64] = {0};
-    GetClassNameW(fg, cls, 64);
-
-    DWORD pid = 0;
-    GetWindowThreadProcessId(fg, &pid);
-    std::wstring exe = ProcessExeName(pid);
-
-    RECT wr;
-    ZeroMemory(&wr, sizeof(wr));
-    GetWindowRect(fg, &wr);
-    HMONITOR mon = MonitorFromWindow(fg, MONITOR_DEFAULTTONEAREST);
-    MONITORINFO mi;
-    ZeroMemory(&mi, sizeof(mi));
-    mi.cbSize = sizeof(mi);
-    GetMonitorInfoW(mon, &mi);
-
-    LONG_PTR style   = GetWindowLongPtrW(fg, GWL_STYLE);
-    LONG_PTR exStyle = GetWindowLongPtrW(fg, GWL_EXSTYLE);
-
-    printf("title     : %ls\n", title);
-    printf("class     : %ls\n", cls);
-    printf("exe       : %ls\n", exe.c_str());
-    printf("rect      : %ld,%ld %ldx%ld\n", wr.left, wr.top,
-           wr.right - wr.left, wr.bottom - wr.top);
-    printf("monitor   : %ldx%ld\n",
-           mi.rcMonitor.right - mi.rcMonitor.left,
-           mi.rcMonitor.bottom - mi.rcMonitor.top);
-    printf("style     : caption=%d thickframe=%d toolwindow=%d topmost=%d\n",
-           (style & WS_CAPTION) == WS_CAPTION ? 1 : 0,
-           (style & WS_THICKFRAME) ? 1 : 0,
-           (exStyle & WS_EX_TOOLWINDOW) ? 1 : 0,
-           (exStyle & WS_EX_TOPMOST) ? 1 : 0);
-    printf("VERDICT   : %s\n", ts3ovl::OverlayGameForegroundNow() ? "GAME (overlay shows)"
-                                                                 : "not a game (overlay hides)");
-    printf("\n");
-}
-
-static BOOL CALLBACK AuditProc(HWND hwnd, LPARAM lParam)
-{
-    int* count = (int*)lParam;
-    if (!IsWindowVisible(hwnd)) return TRUE;
-
-    wchar_t title[256] = {0};
-    GetWindowTextW(hwnd, title, 256);
-    if (!title[0]) return TRUE;
-
-    if (!ts3ovl::OverlayClassifyWindow((unsigned long long)(uintptr_t)hwnd)) return TRUE;
-
-    wchar_t cls[64] = {0};
-    GetClassNameW(hwnd, cls, 64);
-    DWORD pid = 0;
-    GetWindowThreadProcessId(hwnd, &pid);
-    std::wstring exe = ProcessExeName(pid);
-
-    RECT wr;
-    ZeroMemory(&wr, sizeof(wr));
-    GetWindowRect(hwnd, &wr);
-
-    printf("  GAME?  %-22ls %4ldx%-4ld  %-28ls %ls\n",
-           exe.c_str(), wr.right - wr.left, wr.bottom - wr.top, cls, title);
-    ++(*count);
-    return TRUE;
+    printf("entries=%u  autoDetect=%d\n", (unsigned)games.size(),
+           (int)ts3ovl::GamesAutoDetect());
+    for (size_t i = 0; i < games.size(); ++i) {
+        bool alive = false;
+        for (size_t r = 0; r < procs.size(); ++r) {
+            if (procs[r] == games[i].exe) { alive = true; break; }
+        }
+        printf("  %-28s enabled=%d auto=%d %s\n",
+               Narrow(games[i].exe).c_str(), (int)games[i].enabled,
+               (int)games[i].autoAdded, alive ? (games[i].enabled ? "<-- RUNNING"
+                                                                  : "<-- running but disabled")
+                                              : "");
+    }
+    printf("running game    : %s\n", Narrow(ts3ovl::GamesRunningName()).c_str());
+    printf("VERDICT         : %s\n",
+           ts3ovl::OverlayGameForegroundNow() ? "show overlay (a listed game is running)"
+                                              : "hide overlay (no listed game is running)");
+    printf("current visible : %d  hiddenByForeground=%d\n",
+           (int)ts3ovl::OverlayIsShowing(), (int)ts3ovl::OverlayHiddenByForeground());
+    fflush(stdout);
 }
 
 int main(int argc, char** argv)
 {
-    if (argc > 1 && !_stricmp(argv[1], "-all")) {
-        printf("visible windows the heuristic classifies as GAME (false positives show up here):\n");
-        int count = 0;
-        EnumWindows(AuditProc, (LPARAM)&count);
-        printf("total: %d\n", count);
-        return 0;
+    int seconds = 0;
+    std::wstring ini = DefaultIni();
+
+    if (argc > 1) seconds = atoi(argv[1]);
+    if (argc > 2) {
+        const int n = MultiByteToWideChar(CP_UTF8, 0, argv[2], -1, NULL, 0);
+        if (n > 1) {
+            ini.assign((size_t)n - 1, L'\0');
+            MultiByteToWideChar(CP_UTF8, 0, argv[2], -1, &ini[0], n);
+        }
     }
 
-    int times = 1;
-    if (argc > 1) times = atoi(argv[1]);
-    if (times < 1) times = 1;
-    for (int i = 0; i < times; ++i) {
-        if (times > 1) printf("--- sample %d ---\n", i + 1);
-        Report();
-        if (i + 1 < times) Sleep(1000);
+    ts3ovl::GamesInit(ini);
+    printf("ini             : %s\n", Narrow(ini).c_str());
+    fflush(stdout);
+
+    if (seconds <= 0) { Dump(); return 0; }
+
+    for (int t = 0; t < seconds; ++t) {
+        printf("--- t=%d ---\n", t);
+        Dump();
+        Sleep(1000);
     }
     return 0;
 }

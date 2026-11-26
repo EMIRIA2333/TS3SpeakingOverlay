@@ -59,6 +59,21 @@ bool OverlayHiddenByForeground();
  * onlyInGame). Safe to call from any thread; used by the settings window. */
 void OverlaySaveSettings();
 
+/* ---- appearance ------------------------------------------------------
+ * Colours are 0xAARRGGBB. bgColor with alpha 0 means "no background at all"
+ * (the see-through default); raise the alpha to make the panel readable over
+ * bright game scenes. fontSize is in px at 96 dpi, clamped to 8..32.
+ * Both functions are thread safe. OverlaySetAppearance() also rebuilds the
+ * DirectWrite objects and repaints immediately. */
+struct Appearance {
+    unsigned int bgColor;
+    unsigned int textColor;
+    int          fontSize;
+};
+
+void OverlayGetAppearance(Appearance* out);
+void OverlaySetAppearance(const Appearance& value);
+
 /* True when the overlay is currently shown (nobody talking -> false). */
 bool OverlayIsShowing();
 

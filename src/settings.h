@@ -1,28 +1,25 @@
 /*
  * ts3-speaking-overlay - always-on-top "who is talking" overlay (KOOK style)
- * settings.h : small native settings window (live switch states)
- *
- * TS3's PluginMenuItem has no checked/state field, the client calls
- * ts3plugin_initMenus exactly once per process and it frees the menu array
- * immediately afterwards, so the plugin menu can never show live states.
- * The client does however offer a real per-plugin config window
- * (Options -> Addons -> Settings, i.e. ts3plugin_configure), which is what
- * this window is for: three checkboxes that always reflect the actual state.
+ * settings.h : native settings window
  */
 #ifndef TS3OVL_SETTINGS_H
 #define TS3OVL_SETTINGS_H
 
 namespace ts3ovl {
 
-/* Show (or raise) the settings window.
- * owner may be NULL; it is only used as the owner window for z-order.
- * Must be called from a thread that pumps messages (the TS3 GUI thread). */
+/* Show (and raise) the settings window; runs a modal message loop, so it must
+ * be called from a thread that is allowed to block - which is what the client
+ * gives us through ts3plugin_configure (see PLUGIN_OFFERS_CONFIGURE_NEW_THREAD).
+ * `owner` is the client's QWidget* and is only used as a hint. */
 void SettingsShow(void* owner);
 
-/* Same, but never blocks the caller: the window is opened on its own thread.
- * Use this from contexts that must not pump messages (e.g. the plugin menu
- * handler, which runs on the client's Qt GUI thread). */
+/* Same, but never blocks: opens the window on its own thread and returns
+ * immediately. Used from the plugin menu, i.e. the client's Qt GUI thread. */
 void SettingsShowAsync();
+
+/* Same as SettingsShowAsync but jumps straight to the update section, so the
+ * "检查更新…" menu item does not have to make the user find the button. */
+void SettingsShowUpdateAsync();
 
 /* Close the window if it is open (used from ts3plugin_shutdown). */
 void SettingsClose();

@@ -43,6 +43,7 @@
 #include <vector>
 
 #include "overlay.h"
+#include "games.h"
 
 using namespace Gdiplus;
 
@@ -86,6 +87,19 @@ const UINT_PTR kTimerRedraw   = 1;
 const int      kRedrawMs      = 40;   /* gentle pulse while someone talks   */
 const int      kIdleMs        = 250;  /* idle repaint: only the game gate   */
 
+/* Background re-scan of the Steam libraries. A new game must show up in the
+ * list without the user opening the settings window, so the scan runs on its
+ * own timer. The interval is deliberately long: reading every appmanifest and
+ * walking the game folders takes 30-300 ms, which must not happen while the
+ * overlay is animating. */
+const UINT_PTR kTimerScan     = 2;
+const int      kScanMs        = 60000;
+const int      kScanFirstMs   = 15000; /* give TS3 time to finish starting */
+const UINT     WM_APP_SCAN_DONE = WM_APP + 1;
+/* appearance changed: the DirectWrite objects (which encode colour and size)
+ * belong to the overlay thread, so they are dropped there, not in the caller. */
+const UINT     WM_APP_REBUILD_TEXT = WM_APP + 2;
+
 /* ------------------------------------------------------------------ */
 /* shared state                                                        */
 /* ------------------------------------------------------------------ */
@@ -97,6 +111,10 @@ struct Shared {
     bool                        locked    = false;
     bool                        onlyInGame = true;  /* KOOK-like default: games only */
     float                       pulse     = 0.0f;
+    /* appearance, editable from the settings window */
+    unsigned int                bgColor   = 0x00000000; /* fully transparent by default */
+    unsigned int                textColor = 0xFFFFFFFF;
+    int                         fontSize  = 12;         /* px at 96 dpi */
 } g_shared;
 
 HWND          g_hwnd       = NULL;
@@ -106,6 +124,10 @@ HINSTANCE     g_inst       = NULL;
 std::wstring  g_iniPath;
 ULONG_PTR     g_gdiplusTok = 0;
 bool          g_gdiPlusUp  = false;
+
+/* Background Steam scan state. Only touched from the overlay thread (the timer
+ * starts it) except for the finished flag, which the worker sets. */
+volatile LONG g_scanRunning = 0;
 
 int           g_width      = 260;   /* current client size, recomputed on layout */
 int           g_height     = 0;
@@ -143,11 +165,24 @@ ID2D1SolidColorBrush*  g_d2dShadowDim = NULL;
 IDWriteFactory*        g_dw       = NULL;
 IDWriteTextFormat*     g_dwFormat = NULL;
 int                    g_d2dDpi   = 0;   /* dpi the text format was built for */
+int                    g_d2dFontPx = 0;  /* font size the formats were built for */
+unsigned int           g_d2dTextColor = 0; /* colour the brushes were built for  */
 
 /* ------------------------------------------------------------------ */
 /* helpers                                                             */
 /* ------------------------------------------------------------------ */
 inline int Dip(int px, int dpi) { return MulDiv(px, dpi, 96); }
+
+/* Current font size (px at 96 dpi). Read under the shared lock because the
+ * settings window may change it at any moment. */
+int GetFontPx()
+{
+    std::lock_guard<std::mutex> lk(g_shared.lock);
+    int px = g_shared.fontSize;
+    if (px < 8)  px = 8;
+    if (px > 32) px = 32;
+    return px;
+}
 
 /* Optional tracing: set TS3OVL_DEBUG=1 to log into %TEMP%\ts3ovl_dbg.log. */
 void Dbg(const wchar_t* fmt, ...)
@@ -191,6 +226,29 @@ void IniSet(const wchar_t* key, int value)
     WritePrivateProfileStringW(L"overlay", key, buf, g_iniPath.c_str());
 }
 
+/* Same as IniSet but for a free-form value (colours are stored as 0xAARRGGBB
+ * hex text so they stay readable in overlay.ini). */
+void IniSetStr(const wchar_t* key, const std::wstring& value)
+{
+    if (g_iniPath.empty()) return;
+    WritePrivateProfileStringW(L"overlay", key, value.c_str(), g_iniPath.c_str());
+}
+
+std::wstring ColorToHex(unsigned int argb)
+{
+    wchar_t buf[16];
+    wsprintfW(buf, L"0x%08X", argb);
+    return buf;
+}
+
+unsigned int HexToColor(const std::wstring& text, unsigned int fallback)
+{
+    if (text.empty()) return fallback;
+    const wchar_t* p = text.c_str();
+    if (p[0] == L'0' && (p[1] == L'x' || p[1] == L'X')) p += 2;
+    return (unsigned int)wcstoul(p, NULL, 16);
+}
+
 void SavePosition()
 {
     IniSet(L"x", g_x);
@@ -205,6 +263,14 @@ void LoadPosition()
     g_y = _wtoi(IniGet(L"y", L"-10000").c_str());
     g_shared.locked     = _wtoi(IniGet(L"locked", L"0").c_str()) != 0;
     g_shared.onlyInGame = _wtoi(IniGet(L"onlyInGame", L"1").c_str()) != 0;
+
+    /* appearance */
+    g_shared.bgColor   = HexToColor(IniGet(L"bgColor", L"0x00000000"), 0x00000000u);
+    g_shared.textColor = HexToColor(IniGet(L"textColor", L"0xFFFFFFFF"), 0xFFFFFFFFu);
+    int fs = _wtoi(IniGet(L"fontSize", L"12").c_str());
+    if (fs < 8)  fs = 8;
+    if (fs > 32) fs = 32;
+    g_shared.fontSize = fs;
 }
 
 /* Default position: right edge of the primary work area, vertically centred. */
@@ -219,138 +285,12 @@ void DefaultPosition(int w, int h)
 }
 
 /* ------------------------------------------------------------------ */
-/* game detection                                                      */
+/* game detection moved to games.cpp                                   */
 /* ------------------------------------------------------------------ */
-/* Exe names that are definitely not games; a foreground window belonging to
- * one of these never counts as "in game". Lower-case, no extension path. */
-const wchar_t* const kNonGameExes[] = {
-    L"explorer.exe", L"ts3client_win64.exe", L"ts3client_win32.exe",
-    L"chrome.exe", L"msedge.exe", L"firefox.exe", L"brave.exe", L"opera.exe",
-    L"vivaldi.exe", L"360se.exe", L"qqbrowser.exe", L"sogouexplorer.exe",
-    L"discord.exe", L"kook.exe", L"qq.exe", L"wechat.exe", L"weixin.exe",
-    L"tim.exe", L"dingtalk.exe", L"wxwork.exe", L"telegram.exe",
-    L"code.exe", L"devenv.exe", L"notepad.exe", L"notepad++.exe",
-    L"notepad3.exe", L"wps.exe", L"winword.exe", L"excel.exe", L"powerpnt.exe",
-    L"acrobat.exe", L"acrord32.exe", L"sumatrapdf.exe",
-    L"cmd.exe", L"powershell.exe", L"pwsh.exe", L"windowsterminal.exe",
-    L"conhost.exe", L"wt.exe", L"wt3.exe", L"bash.exe", L"wsl.exe",
-    L"taskmgr.exe", L"regedit.exe", L"control.exe", L"mmc.exe",
-    L"searchapp.exe", L"startmenuexperiencehost.exe", L"shellexperiencehost.exe",
-    L"applicationframehost.exe", L"lockapp.exe", L"textinputhost.exe",
-    L"msiafterburner.exe", L"rtss.exe", L"rivatuner.exe", L"fraps.exe",
-    L"obs64.exe", L"obs32.exe", L"streamlabs obs.exe",
-    L"potplayermini64.exe", L"vlc.exe", L"mpc-hc64.exe", L"mpc-be64.exe",
-    L"cloudmusic.exe", L"qqmusic.exe", L"spotify.exe",
-    L"photoshop.exe", L"illustrator.exe", L"lightroom.exe", L"figma.exe",
-    L"idea64.exe", L"pycharm64.exe", L"clion64.exe", L"goland64.exe",
-    L"webstorm64.exe", L"rider64.exe", L"sublime_text.exe", L"atom.exe",
-    L"everything.exe", L"7zfm.exe", L"winrar.exe", L"bandizip.exe",
-    /* screen-capture / vendor overlay tools sit fullscreen on top of games and
-     * would otherwise be mistaken for one (e.g. CEF-OSC-WIDGET, 2047x1152) */
-    L"nvidia overlay.exe", L"nvidia share.exe", L"nvsphelper64.exe",
-    L"nvcontainer.exe", L"radeonsoftware.exe", L"amdow.exe", L"amdfendrsr.exe",
-    L"gamebar.exe", L"gamebarftserver.exe", L"xboxgamebarwidgets.exe",
-    L"xboxapp.exe", L"igfxem.exe", L"igfxtray.exe", L"displaylink.exe",
-    NULL
-};
-
-/* Lower-case file name (no directory) of the given process id. */
-std::wstring ProcessExeName(DWORD pid)
-{
-    std::wstring result;
-    HANDLE h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
-    if (!h) return result;
-
-    wchar_t path[MAX_PATH * 2] = {0};
-    DWORD len = (DWORD)(sizeof(path) / sizeof(path[0]));
-    if (QueryFullProcessImageNameW(h, 0, path, &len) && len > 0) {
-        const wchar_t* base = path;
-        for (const wchar_t* p = path; *p; ++p) {
-            if (*p == L'\\' || *p == L'/') base = p + 1;
-        }
-        for (const wchar_t* p = base; *p; ++p) result.push_back((wchar_t)towlower(*p));
-    }
-    CloseHandle(h);
-    return result;
-}
-
-bool IsExeBlacklisted(const std::wstring& exe)
-{
-    for (int i = 0; kNonGameExes[i]; ++i) {
-        if (exe == kNonGameExes[i]) return true;
-    }
-    return false;
-}
-
-/* True when the given window belongs to a fullscreen/background-less app that
- * is not the shell and not one of the known desktop apps. That is the
- * practical definition of "the user is in a game". Split out from
- * IsGameForeground() so it can be exercised with an explicit window. */
-bool IsGameWindow(HWND fg)
-{
-    if (!fg || fg == g_hwnd) return false;
-
-    /* desktop / shell windows are never games */
-    wchar_t cls[64] = {0};
-    GetClassNameW(fg, cls, 64);
-    if (!wcscmp(cls, L"Progman") || !wcscmp(cls, L"WorkerW") ||
-        !wcscmp(cls, L"Shell_TrayWnd") || !wcscmp(cls, L"Shell_SecondaryTrayWnd") ||
-        !wcscmp(cls, L"NotifyIconOverflowWindow") || !wcscmp(cls, L"Windows.UI.Core.CoreWindow") ||
-        !wcscmp(cls, L"ApplicationFrameWindow") || !wcscmp(cls, L"TaskListThumbnailWnd") ||
-        /* vendor overlay widgets drawn by a helper process, not by the game */
-        !wcscmp(cls, L"CEF-OSC-WIDGET") || !wcscmp(cls, L"Chrome_WidgetWin_1") ||
-        !wcscmp(cls, L"EdgeUiInputTopWndClass") || !wcscmp(cls, L"Windows.UI.Composition.DesktopWindowContentBridge")) {
-        return false;
-    }
-
-    if (IsIconic(fg) || !IsWindowVisible(fg)) return false;
-
-    DWORD pid = 0;
-    GetWindowThreadProcessId(fg, &pid);
-    if (pid == 0) return false;
-    std::wstring exe = ProcessExeName(pid);
-    if (exe.empty() || IsExeBlacklisted(exe)) return false;
-
-    /* does the window cover its monitor? (exclusive or borderless fullscreen) */
-    RECT wr;
-    if (!GetWindowRect(fg, &wr)) return false;
-    HMONITOR mon = MonitorFromWindow(fg, MONITOR_DEFAULTTONEAREST);
-    MONITORINFO mi;
-    ZeroMemory(&mi, sizeof(mi));
-    mi.cbSize = sizeof(mi);
-    if (!GetMonitorInfoW(mon, &mi)) return false;
-
-    const int tol = 2;
-    int w = wr.right - wr.left;
-    int h = wr.bottom - wr.top;
-    int mw = mi.rcMonitor.right - mi.rcMonitor.left;
-    int mh = mi.rcMonitor.bottom - mi.rcMonitor.top;
-    if (w >= mw - tol && h >= mh - tol &&
-        wr.left <= mi.rcMonitor.left + tol && wr.top <= mi.rcMonitor.top + tol) {
-        return true;
-    }
-
-    /* not fullscreen: fall back to "no caption, no border, larger than half
-     * the screen" which catches most windowed-borderless games */
-    LONG_PTR style   = GetWindowLongPtrW(fg, GWL_STYLE);
-    LONG_PTR exStyle = GetWindowLongPtrW(fg, GWL_EXSTYLE);
-    bool noCaption = (style & WS_CAPTION) != WS_CAPTION;
-    bool noBorder  = (style & WS_THICKFRAME) == 0;
-    bool notTool   = (exStyle & WS_EX_TOOLWINDOW) == 0;
-    bool topMost   = (exStyle & WS_EX_TOPMOST) == 0;   /* always-on-top apps are overlays/launchers */
-    if (noCaption && noBorder && notTool && topMost &&
-        w >= mw / 2 && h >= mh / 2) {
-        return true;
-    }
-    return false;
-}
-
-/* Foreground-window wrapper used by the per-frame gate. */
-bool IsGameForeground()
-{
-    return IsGameWindow(GetForegroundWindow());
-}
-
+/* The old gate guessed "is the foreground window a fullscreen game" from  */
+/* window styles and an exe blacklist. It is replaced by an explicit list  */
+/* of game executables (games.h) so the user decides which games show the  */
+/* overlay; see GamesAnyRunning() in the per-frame gate inside Paint().    */
 /* Snap the given position to the nearest monitor edge when it is close. */
 void SnapToEdges(int& x, int& y, int w, int h)
 {
@@ -374,6 +314,34 @@ void SnapToEdges(int& x, int& y, int w, int h)
     if (x + w > wa.right)         x = wa.right - w;
     if (y < wa.top)               y = wa.top;
     if (y + h > wa.bottom)        y = wa.bottom - h;
+}
+
+/* Keep a coordinate inside the work area of the monitor the panel is on.
+ * Used when the panel grows (bigger font) so it cannot end up off-screen. */
+int ClampToWorkArea(int x, int w)
+{
+    HMONITOR mon = MonitorFromPoint(POINT{x + w / 2, g_y + g_height / 2}, MONITOR_DEFAULTTONEAREST);
+    MONITORINFO mi;
+    ZeroMemory(&mi, sizeof(mi));
+    mi.cbSize = sizeof(mi);
+    if (!GetMonitorInfoW(mon, &mi)) return x;
+    const RECT& wa = mi.rcWork;
+    if (x + w > wa.right) x = wa.right - w;
+    if (x < wa.left)      x = wa.left;
+    return x;
+}
+
+int ClampToWorkAreaY(int y, int h)
+{
+    HMONITOR mon = MonitorFromPoint(POINT{g_x + g_width / 2, y + h / 2}, MONITOR_DEFAULTTONEAREST);
+    MONITORINFO mi;
+    ZeroMemory(&mi, sizeof(mi));
+    mi.cbSize = sizeof(mi);
+    if (!GetMonitorInfoW(mon, &mi)) return y;
+    const RECT& wa = mi.rcWork;
+    if (y + h > wa.bottom) y = wa.bottom - h;
+    if (y < wa.top)        y = wa.top;
+    return y;
 }
 
 /* ------------------------------------------------------------------ */
@@ -426,8 +394,23 @@ void TeardownTextEngine()
  * Returns false when Direct2D is unavailable; callers then fall back to GDI+. */
 bool InitTextEngine(int dpi)
 {
-    if (g_dwFormat && g_d2dDpi == dpi) return true;
+    /* Font size and text colour are user settings, so the cached formats and
+     * brushes have to be rebuilt when either of them changes - not only on a
+     * DPI change. */
+    int fontPx = kFontSizePx;
+    unsigned int textColor = kText;
+    {
+        std::lock_guard<std::mutex> lk(g_shared.lock);
+        fontPx    = g_shared.fontSize;
+        textColor = 0xFF000000u | (g_shared.textColor & 0x00FFFFFFu);
+    }
+    if (g_dwFormat && g_d2dDpi == dpi && g_d2dFontPx == fontPx &&
+        g_d2dTextColor == textColor) {
+        return true;
+    }
     TeardownTextEngine();
+    g_d2dFontPx    = fontPx;
+    g_d2dTextColor = textColor;
 
     if (!g_d2d) {
         if (FAILED(D2D1CreateFactory(D2D1_FACTORY_TYPE_SINGLE_THREADED, &g_d2d)) || !g_d2d) {
@@ -459,13 +442,13 @@ bool InitTextEngine(int dpi)
         }
     }
 
-    /* font size is kFontSizePx DIPs; SetDpi maps DIPs onto the pixel surface */
+    /* font size comes from the settings (DIPs); SetDpi maps DIPs onto pixels */
     g_d2dRt->SetDpi((float)dpi, (float)dpi);
     if (FAILED(g_dw->CreateTextFormat(L"Microsoft YaHei UI", NULL,
                                       DWRITE_FONT_WEIGHT_NORMAL,
                                       DWRITE_FONT_STYLE_NORMAL,
                                       DWRITE_FONT_STRETCH_NORMAL,
-                                      (float)kFontSizePx, L"", &g_dwFormat)) || !g_dwFormat) {
+                                      (float)fontPx, L"", &g_dwFormat)) || !g_dwFormat) {
         g_dwFormat = NULL;
         return false;
     }
@@ -514,15 +497,26 @@ void DrawNamesD2D(HDC memDc, int w, int h,
     if (!g_d2dRt || !g_dwFormat) return;
     RECT rc = { 0, 0, w, h };
     if (FAILED(g_d2dRt->BindDC(memDc, &rc))) return;
+
+    /* text colour is a user setting: 0xAARRGGBB with the alpha forced to 255
+     * here, because the dimming factor is applied separately below. */
+    float tr = 1.0f, tg = 1.0f, tb = 1.0f;
+    {
+        std::lock_guard<std::mutex> lk(g_shared.lock);
+        const unsigned int c = g_shared.textColor;
+        tr = (float)((c >> 16) & 0xFF) / 255.0f;
+        tg = (float)((c >> 8)  & 0xFF) / 255.0f;
+        tb = (float)( c        & 0xFF) / 255.0f;
+    }
     if (!g_d2dText) {
-        if (FAILED(g_d2dRt->CreateSolidColorBrush(D2D1::ColorF(1.0f, 1.0f, 1.0f, 1.0f),
+        if (FAILED(g_d2dRt->CreateSolidColorBrush(D2D1::ColorF(tr, tg, tb, 1.0f),
                                                   &g_d2dText)) || !g_d2dText) {
             return;
         }
     }
     if (!g_d2dDim) {
         const float d = (float)kDimAlpha / 255.0f;
-        if (FAILED(g_d2dRt->CreateSolidColorBrush(D2D1::ColorF(1.0f, 1.0f, 1.0f, d),
+        if (FAILED(g_d2dRt->CreateSolidColorBrush(D2D1::ColorF(tr, tg, tb, d),
                                                   &g_d2dDim)) || !g_d2dDim) {
             return;
         }
@@ -582,13 +576,15 @@ void DrawInitialsD2D(HDC memDc, int w, int h,
      * push a single glyph to the left edge of the disc's box. */
     static IDWriteTextFormat* s_center = NULL;
     static int s_centerDpi = 0;
-    if (!s_center || s_centerDpi != g_d2dDpi) {
+    static int s_centerPx  = 0;
+    const int wantPx = GetFontPx();
+    if (!s_center || s_centerDpi != g_d2dDpi || s_centerPx != wantPx) {
         if (s_center) { s_center->Release(); s_center = NULL; }
         if (FAILED(g_dw->CreateTextFormat(L"Microsoft YaHei UI", NULL,
                                           DWRITE_FONT_WEIGHT_NORMAL,
                                           DWRITE_FONT_STYLE_NORMAL,
                                           DWRITE_FONT_STRETCH_NORMAL,
-                                          (float)kFontSizePx, L"", &s_center)) || !s_center) {
+                                          (float)wantPx, L"", &s_center)) || !s_center) {
             s_center = NULL;
             return;
         }
@@ -596,10 +592,21 @@ void DrawInitialsD2D(HDC memDc, int w, int h,
         s_center->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER);
         s_center->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
         s_centerDpi = g_d2dDpi;
+        s_centerPx  = wantPx;
     }
 
     RECT rc = { 0, 0, w, h };
     if (FAILED(g_d2dRt->BindDC(memDc, &rc))) return;
+
+    /* same user-defined text colour as the names */
+    float tr = 1.0f, tg = 1.0f, tb = 1.0f;
+    {
+        std::lock_guard<std::mutex> lk(g_shared.lock);
+        const unsigned int c = g_shared.textColor;
+        tr = (float)((c >> 16) & 0xFF) / 255.0f;
+        tg = (float)((c >> 8)  & 0xFF) / 255.0f;
+        tb = (float)( c        & 0xFF) / 255.0f;
+    }
 
     int dpi = g_d2dDpi > 0 ? g_d2dDpi : 96;
     g_d2dRt->BeginDraw();
@@ -608,10 +615,10 @@ void DrawInitialsD2D(HDC memDc, int w, int h,
         if (!entries[i].avatarPath.empty()) continue;   /* real image, no disc */
         if (entries[i].name.empty()) continue;
 
-        /* brush: white for speakers, dimmed for the rest */
+        /* brush: full strength for speakers, dimmed for the rest */
         ID2D1SolidColorBrush* br = NULL;
         const float a = entries[i].talking ? 1.0f : (float)kDimAlpha / 255.0f;
-        if (FAILED(g_d2dRt->CreateSolidColorBrush(D2D1::ColorF(1.0f, 1.0f, 1.0f, a), &br)) || !br)
+        if (FAILED(g_d2dRt->CreateSolidColorBrush(D2D1::ColorF(tr, tg, tb, a), &br)) || !br)
             continue;
         drewAnything = true;
 
@@ -649,7 +656,7 @@ Layout ComputeLayout(int count, int dpi, const std::vector<Entry>& entries)
     L.padY       = Dip(kPaddingY, dpi);
     L.gap        = Dip(kGap, dpi);
     L.radius     = Dip(kCornerRadius, dpi);
-    L.fontSize   = Dip(kFontSizePx, dpi);
+    L.fontSize   = Dip(GetFontPx(), dpi);
 
     /* width adapts to the longest name, clamped.
      * Measured with DirectWrite so the width matches what DrawNamesD2D will
@@ -831,10 +838,16 @@ void Paint(HWND hwnd)
         wantVisible = g_shared.visible;
         onlyInGame  = g_shared.onlyInGame;
     }
-    /* "only show while a game is the foreground app" - the foreground window
-     * can change at any time, so this is re-evaluated on every paint. */
-    if (wantVisible && onlyInGame && !IsGameForeground()) {
-        Dbg(L"[paint] only-in-game set, foreground is not a game -> hide");
+    /* "only show while one of the games in my list is running".
+     *
+     * This used to be a heuristic on the foreground window (fullscreen and
+     * captionless => game). It is now the explicit game list from games.cpp:
+     * the panel is shown while any enabled executable of that list is running,
+     * no matter which window has focus, which is both predictable and lets the
+     * user decide per game. Re-evaluated on every paint (the result is cached
+     * inside GamesAnyRunning() for a fraction of a second). */
+    if (wantVisible && onlyInGame && !GamesAnyRunning()) {
+        Dbg(L"[paint] only-in-game set, no game from the list is running -> hide");
         if (IsWindowVisible(hwnd)) ShowWindow(hwnd, SW_HIDE);
         g_width = g_height = 0;
         g_wasVisible = false;   /* next show must re-assert topmost */
@@ -848,9 +861,15 @@ void Paint(HWND hwnd)
 
     /* resize if the layout changed */
     int newW = L.width, newH = L.height;
-    Dbg(L"[paint] layout w=%d h=%d pos=%d,%d", newW, newH, g_x, g_y);
     if (newW != g_width || newH != g_height) {
+        Dbg(L"[paint] layout w=%d h=%d pos=%d,%d", newW, newH, g_x, g_y);
         if (g_x < -9000) DefaultPosition(newW, newH);
+        if (g_width > 0 && g_height > 0) {
+            /* keep the panel inside the work area when the font size (and thus
+             * the panel width) grew, so a wider panel does not hang off-screen */
+            g_x = ClampToWorkArea(g_x, newW);
+            g_y = ClampToWorkAreaY(g_y, newH);
+        }
         g_width  = newW;
         g_height = newH;
     }
@@ -904,12 +923,29 @@ void Paint(HWND hwnd)
     g.SetTextRenderingHint(TextRenderingHintAntiAliasGridFit);
     g.SetPixelOffsetMode(PixelOffsetModeHalf);
 
-    /* Panel frame only - the background is transparent on purpose.
+    /* Panel frame + optional background fill.
      *
-     * A single light stroke vanishes on bright game scenes, so the frame is
-     * drawn twice: first a 3px black halo (readable on white), then a 1px
-     * white line on top (readable on black). The result works on any
+     * The default background is 0x00000000 (nothing at all), which is what makes
+     * the panel see-through. The settings window can raise its alpha (and pick a
+     * tint), because white text on a bright game is hard to read.
+     *
+     * The frame is drawn twice: first a 3px black halo (readable on white), then
+     * a 1px light line on top (readable on black). The result works on any
      * background without tinting what is behind the panel. */
+    {
+        unsigned int bgColor;
+        {
+            std::lock_guard<std::mutex> lk(g_shared.lock);
+            bgColor = g_shared.bgColor;
+        }
+        if ((bgColor >> 24) != 0) {
+            GraphicsPath fill;
+            AddRoundedRect(fill, RectF(0.5f, 0.5f, (float)g_width - 1.0f, (float)g_height - 1.0f),
+                           (float)L.radius);
+            SolidBrush bgBrush{Color(bgColor)};
+            g.FillPath(&bgBrush, &fill);
+        }
+    }
     {
         GraphicsPath panel;
         AddRoundedRect(panel, RectF(1.5f, 1.5f, (float)g_width - 3.0f, (float)g_height - 3.0f),
@@ -1028,6 +1064,22 @@ void Paint(HWND hwnd)
 /* ------------------------------------------------------------------ */
 /* window procedure                                                    */
 /* ------------------------------------------------------------------ */
+/* Runs GamesScanForNew() off the UI thread: walking the Steam libraries takes
+ * 30-300 ms and must not stall the paint timer (that would visibly hitch the
+ * pulse animation). The result is only "did the list grow", which the UI thread
+ * reports through the status line. */
+DWORD WINAPI ScanThread(LPVOID param)
+{
+    HWND hwnd = (HWND)param;
+    std::vector<std::wstring> added = GamesScanForNew();
+    const std::vector<std::wstring> fromShortcuts = GamesScanShortcuts();
+    const size_t n = added.size() + fromShortcuts.size();
+    added.clear();
+    InterlockedExchange(&g_scanRunning, 0);
+    if (hwnd) PostMessageW(hwnd, WM_APP_SCAN_DONE, (WPARAM)n, 0);
+    return 0;
+}
+
 LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
 {
     switch (msg) {
@@ -1088,6 +1140,16 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
         return 0;
     }
     case WM_TIMER: {
+        if (wParam == kTimerScan) {
+            KillTimer(hwnd, kTimerScan);
+            SetTimer(hwnd, kTimerScan, kScanMs, NULL);
+            if (GamesAutoDetect() && InterlockedCompareExchange(&g_scanRunning, 1, 0) == 0) {
+                HANDLE h = CreateThread(NULL, 0, ScanThread, hwnd, 0, NULL);
+                if (h) CloseHandle(h);
+                else   InterlockedExchange(&g_scanRunning, 0);
+            }
+            return 0;
+        }
         if (wParam == kTimerRedraw) {
             KillTimer(hwnd, kTimerRedraw);
             /* Always repaint: Paint() itself hides the window when the entry
@@ -1114,6 +1176,40 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
             if (anyTalking)      SetTimer(hwnd, kTimerRedraw, kRedrawMs, NULL);
             else if (anyEntries) SetTimer(hwnd, kTimerRedraw, kIdleMs, NULL);
         }
+        return 0;
+    }
+    /* The Steam libraries are re-read in the background so a freshly installed
+     * game ends up in the list on its own; new entries default to enabled. */
+    case WM_APP_SCAN_DONE: {
+        const size_t added = (size_t)wParam;
+        if (added > 0) {
+            Dbg(L"[scan] %u new game(s) added", (unsigned)added);
+            /* A newly registered game may be the one being launched right now,
+             * so repaint immediately instead of waiting for the next tick. */
+            KillTimer(hwnd, kTimerRedraw);
+            SetTimer(hwnd, kTimerRedraw, 1, NULL);
+        }
+        return 0;
+    }
+    /* Appearance changed from the settings window: the DirectWrite format and
+     * brushes encode colour and size, and the GDI+ fallback font encodes the
+     * size, so everything is dropped here (we are on the overlay thread) and
+     * rebuilt lazily by the next paint. */
+    case WM_APP_REBUILD_TEXT: {
+        TeardownTextEngine();
+        {
+            std::lock_guard<std::mutex> lk(g_gdiLock);
+            delete g_fontName;
+            g_fontName = new Font(L"Microsoft YaHei UI", (REAL)Dip(GetFontPx(), g_currentDpi),
+                                  FontStyleRegular, UnitPixel);
+            if (g_fontName->GetLastStatus() != Ok) {
+                delete g_fontName;
+                g_fontName = NULL;
+            }
+        }
+        /* force a fresh layout too, the font size changes the panel width */
+        g_width = g_height = 0;
+        Paint(hwnd);
         return 0;
     }
     case WM_DISPLAYCHANGE:
@@ -1156,7 +1252,7 @@ DWORD WINAPI OverlayThread(LPVOID)
     /* fonts are created inside the GDI+ lifetime */
     {
         std::lock_guard<std::mutex> lk(g_gdiLock);
-        g_fontName   = new Font(L"Microsoft YaHei UI", (REAL)Dip(kFontSizePx, g_currentDpi),
+        g_fontName   = new Font(L"Microsoft YaHei UI", (REAL)Dip(GetFontPx(), g_currentDpi),
                                 FontStyleRegular, UnitPixel);
         g_fontStatus = new Font(L"Microsoft YaHei UI", (REAL)Dip(12, g_currentDpi),
                                 FontStyleRegular, UnitPixel);
@@ -1194,6 +1290,8 @@ DWORD WINAPI OverlayThread(LPVOID)
     }
 
     SetTimer(g_hwnd, kTimerRedraw, kRedrawMs, NULL);
+    /* background auto-detection of newly installed games */
+    SetTimer(g_hwnd, kTimerScan, kScanFirstMs, NULL);
     Paint(g_hwnd);
 
     MSG msg;
@@ -1205,6 +1303,7 @@ DWORD WINAPI OverlayThread(LPVOID)
     /* teardown: GDI+ objects must die before GdiplusShutdown */
     if (g_hwnd) {
         KillTimer(g_hwnd, kTimerRedraw);
+        KillTimer(g_hwnd, kTimerScan);
         DestroyWindow(g_hwnd);
         g_hwnd = NULL;
     }
@@ -1231,6 +1330,9 @@ bool OverlayStart(HINSTANCE hInst, const std::wstring& iniPath)
     if (g_thread) return true;
     g_inst    = hInst;
     g_iniPath = iniPath;
+    /* The game list lives in the same ini; load it before the first paint so
+     * the very first frame already gates on the right executables. */
+    GamesInit(iniPath);
     g_thread  = CreateThread(NULL, 0, OverlayThread, NULL, 0, NULL);
     return g_thread != NULL;
 }
@@ -1317,13 +1419,50 @@ void OverlaySaveSettings()
     /* Called from the settings window, i.e. NOT from the overlay thread, so the
      * switches have to be read under the lock instead of using SavePosition(). */
     bool locked, onlyInGame;
+    unsigned int bgColor, textColor;
+    int fontSize;
     {
         std::lock_guard<std::mutex> lk(g_shared.lock);
         locked     = g_shared.locked;
         onlyInGame = g_shared.onlyInGame;
+        bgColor    = g_shared.bgColor;
+        textColor  = g_shared.textColor;
+        fontSize   = g_shared.fontSize;
     }
     IniSet(L"locked", locked ? 1 : 0);
     IniSet(L"onlyInGame", onlyInGame ? 1 : 0);
+    IniSetStr(L"bgColor",   ColorToHex(bgColor));
+    IniSetStr(L"textColor", ColorToHex(textColor));
+    IniSet(L"fontSize", fontSize);
+}
+
+void OverlayGetAppearance(Appearance* out)
+{
+    if (!out) return;
+    std::lock_guard<std::mutex> lk(g_shared.lock);
+    out->bgColor   = g_shared.bgColor;
+    out->textColor = g_shared.textColor;
+    out->fontSize  = g_shared.fontSize;
+}
+
+void OverlaySetAppearance(const Appearance& value)
+{
+    {
+        std::lock_guard<std::mutex> lk(g_shared.lock);
+        g_shared.bgColor   = value.bgColor;
+        /* the text itself is always opaque; only the dim factor is applied on
+         * top, so a user-picked alpha here would make names invisible */
+        g_shared.textColor = 0xFF000000u | (value.textColor & 0x00FFFFFFu);
+        int fs = value.fontSize;
+        if (fs < 8)  fs = 8;
+        if (fs > 32) fs = 32;
+        g_shared.fontSize = fs;
+    }
+    /* The cached DirectWrite format/brushes encode colour and size, and the
+     * GDI+ fallback font encodes the size, so they must be rebuilt. D2D/DWrite
+     * objects belong to the overlay thread, so the teardown is requested with a
+     * message instead of being done here on the caller's (settings) thread. */
+    if (g_hwnd) PostMessageW(g_hwnd, WM_APP_REBUILD_TEXT, 0, 0);
 }
 
 bool OverlayHiddenByForeground()
@@ -1333,7 +1472,7 @@ bool OverlayHiddenByForeground()
         std::lock_guard<std::mutex> lk(g_shared.lock);
         onlyInGame = g_shared.onlyInGame;
     }
-    return onlyInGame && !IsGameForeground();
+    return onlyInGame && !GamesAnyRunning();
 }
 
 bool OverlayVisibleEnabled()
@@ -1361,12 +1500,17 @@ bool OverlayIsShowing()
 
 bool OverlayGameForegroundNow()
 {
-    return IsGameForeground();
+    /* Kept for the standalone probe: now means "a listed game is running". */
+    return GamesAnyRunning();
 }
 
 bool OverlayClassifyWindow(unsigned long long hwnd)
 {
-    return IsGameWindow((HWND)(uintptr_t)hwnd);
+    /* Kept for the probe: a window belongs to a game when its executable is in
+     * the list (or was just auto-detected as one). */
+    const std::wstring exe = GamesExeOfWindow(hwnd);
+    if (exe.empty()) return false;
+    return GamesContains(exe);
 }
 
 } // namespace ts3ovl

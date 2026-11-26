@@ -92,7 +92,14 @@ if (-not $inserted) { $out.Add($entry) }
 Set-Content -Path $addons -Value $out -Encoding Default
 Write-Host "registered in $addons as: $entry"
 
-Move-Item (Join-Path $plugins 'overlay.ini') (Join-Path $plugins 'overlay.ini.bak') -Force -ErrorAction SilentlyContinue
+# Keep the user's settings: copy overlay.ini aside for rollback, but never move
+# it away - the plugin would start from defaults (window position, game list and
+# every switch) after each deploy.
+$ini = Join-Path $plugins 'overlay.ini'
+if (Test-Path $ini) {
+    Copy-Item $ini ($ini + '.bak') -Force -ErrorAction SilentlyContinue
+    Write-Host "kept existing overlay.ini (backup: overlay.ini.bak)"
+}
 
 # --- restart -------------------------------------------------------------
 if (-not $NoRestart) {

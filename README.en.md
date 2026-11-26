@@ -14,9 +14,19 @@ highlighted with a pulsing green ring; everyone else stays in place but is
 
 - **Always on top**: `WS_EX_TOPMOST | WS_EX_LAYERED`, so it shows over games in
   borderless/fullscreen-windowed mode, browsers and players.
-- **Transparent background**: only a rounded frame is drawn (dark halo + white
-  stroke), the game shows through completely; nicknames get a 1 px black shadow so
-  they stay readable on bright scenes.
+- **Background you can adjust**: by default no background is filled (only a
+  rounded frame with a dark halo + white stroke, the game shows through
+  completely); the settings window can also paint the background and set its
+  **opacity (0–100 %)**, e.g. 70 % dark grey when you want more contrast. The
+  nickname keeps its 1 px black shadow in every case.
+- **Colour and font size are configurable**: text colour (any colour, via the
+  `ChooseColor` picker) and font size (8–32 px) live in the **Appearance** group of
+  the settings window, take effect immediately, repaint the panel and are written
+  to `overlay.ini`.
+- **Muting really means not talking**: `STATUS_TALKING_WHILE_DISABLED` and the
+  local microphone mute state are both honoured, so pressing TS3's mute button
+  removes you from the speaker list immediately — no "still talking while muted"
+  ghost.
 - **The whole channel**: members come from `getChannelClientList`. Speakers are
   highlighted with a pulsing green ring, the rest are **dimmed but keep their
   slot** (KOOK behaviour) — icons do not vanish when nobody talks.
@@ -27,9 +37,13 @@ highlighted with a pulsing green ring; everyone else stays in place but is
   has no font fallback at all and draws them as empty boxes.
 - **Talking ring**: a green pulsing ring on the current speaker; multiple
   simultaneous speakers are ordered by `clientID`, so rows never shuffle.
-- **Only while gaming** (can be turned off): checks whether the foreground window
-  is a game. On the desktop, in a browser or in a chat app the overlay does not
-  appear at all — same as KOOK.
+- **Only while gaming** (can be turned off): the plugin keeps a **game list**;
+  the overlay shows as soon as **any enabled game in that list is running** — the
+  game does not have to be focused or fullscreen. Steam / Epic / WeGame / GOG /
+  Battle.net / EA / Ubisoft are scanned automatically and newly installed games
+  start out enabled.
+- **The game list is editable**: tick, enable/disable or delete entries in the
+  settings window; a deleted game is not re-added by the automatic scan.
 - **Snaps to screen edges**: release the drag within 36 px of an edge and it
   aligns itself.
 - **Hides only when the channel is empty**: nobody connected / empty channel →
@@ -144,11 +158,19 @@ The plugin uses the client's real configuration entry point instead
 
 ![settings window](docs/settings.png)
 
-The three checkboxes always mirror the real state; toggling one takes effect
-immediately and is written to `overlay.ini`. The status line at the bottom also
-tells you whether the overlay is actually on screen right now (and whether it is
-being hidden by "only while gaming"). The window re-syncs once per second, so it
-also follows changes made from the menu.
+The window has four blocks: the three checkboxes at the top control
+show / only-while-gaming / lock; the **appearance** group holds text colour, the
+background colour, the background-opacity slider, the font-size combo and "restore
+the default look"; the **game list** group holds the list plus one button row (add
+current foreground program / browse for an exe… / scan installed games / enable /
+disable / remove from list); the **check for updates** group holds the current
+version, the check button, the release-page button, the status text and
+download-and-install. Nothing overlaps, the window resizes freely (minimum 760×700)
+and the button row always sits directly under the list.
+
+The status line at the bottom tells you whether the overlay is actually on screen
+right now (and whether it is being hidden by "only while gaming"). The window
+re-syncs once per second, so it also follows changes made from the menu.
 
 > The first four menu items still toggle things at any time — their captions are
 > fixed action labels, so look at the settings window for the current state.
@@ -158,33 +180,98 @@ Releasing within 36 px of a screen edge snaps it to that edge. Position is store
 in `overlay.ini` (plugin folder, `[overlay]` section: `x`, `y`, `locked`,
 `onlyInGame`).
 
-### Look: transparent background, rounded frame only
+### Look: background, text colour and font size are configurable
 
-The overlay draws **no background fill** — just a rounded frame (an outer dark
-halo plus an inner white stroke), so the game shows through completely and never
-gets blocked. To keep the white nicknames readable on bright scenes every name is
-drawn twice in Direct2D: a 1 px near-black shadow, then the main text.
+By default the overlay draws **no background fill** — just a rounded frame (an
+outer dark halo plus an inner white stroke), so the game shows through completely.
+Every name is drawn twice in Direct2D (a 1 px near-black shadow, then the main
+text), which keeps it readable over bright scenes.
+
+The **Appearance** group in the settings window has four controls, all of which
+apply immediately and are written to `overlay.ini` at once:
+
+| Control | Effect | ini key |
+| --- | --- | --- |
+| Text colour… | colour picker for the nicknames | `textColor=0xAARRGGBB` (alpha forced to FF) |
+| Background colour… | colour picker for the panel | `bgColor=0xAARRGGBB` |
+| Background opacity | 0–255 slider (shown as a percentage) | the alpha byte of `bgColor` |
+| Font size | 8 / 10 / … / 32 px combo | `fontSize=<px>` |
+
+An alpha of 0 in `bgColor` means no background at all (the default); "restore the
+default look" puts back transparent / white text / 12 px.
+
+> Changing the look posts `WM_APP_REBUILD_TEXT` so `TeardownTextEngine()` runs on
+> the overlay's own thread before the DirectWrite format objects are rebuilt —
+> touching D2D objects across threads crashes. If a bigger font pushes the panel
+> off-screen it is clamped back into the monitor work area.
 
 ### How "only while gaming" is decided
 
-`IsGameWindow()` in `src/overlay.cpp`, evaluated every frame (~25 fps) for the
-current foreground window:
+The foreground window is no longer consulted. `src/games.cpp` keeps a **game
+list** and enumerates running processes every 400 ms: the overlay is shown as
+soon as **any enabled executable in that list is running**, regardless of focus,
+fullscreen mode or window mode. Consequences:
 
-1. Reject shell windows: `Progman` / `WorkerW` / `Shell_TrayWnd` /
-   `ApplicationFrameWindow` / `CEF-OSC-WIDGET` (vendor overlays such as NVIDIA's
-   and Discord's) and friends.
-2. Reject blacklisted executables: browsers, chat clients, editors, terminals,
-   media players, capture/GPU tools, `ts3client_win64.exe` itself, … (the full
-   list is `kNonGameExes[]`).
-3. Treat the window as a game if either holds:
-   - its rectangle covers the whole monitor (2 px tolerance) → exclusive /
-     borderless fullscreen;
-   - it has no caption, no resizing frame, is neither `WS_EX_TOOLWINDOW` nor
-     `WS_EX_TOPMOST`, and is at least half the screen in both dimensions →
-     borderless-windowed game.
+- a game running in the background (you alt-tabbed to a browser) still shows the
+  overlay;
+- a game that is not running never makes the overlay appear, even when focused;
+- matching is by lower-cased executable name only, e.g. `cs2.exe`.
 
-The check does not use a game list, so new games need no code change. If it
-misfires, add the executable name to `kNonGameExes[]` and rebuild.
+There are four ways an entry gets into the list:
+
+1. **Automatic scan** (on by default): once 15 s after startup and then every
+   60 s, newly installed games are added and **default to enabled**. The scanner
+   understands Steam (`libraryfolders.vdf` + `appmanifest_*.acf`), Epic
+   (`LauncherInstalled.dat` + `Manifests\*.item`), GOG (registry), Battle.net, EA,
+   Ubisoft, plus `WeGameApps` / `Epic Games` / `GOG Games` / `XboxGames` /
+   `Riot Games` / `Games` trees on every fixed drive.
+2. **Desktop / Start-menu shortcuts**: portable, zip-installed games that no
+   launcher knows about can only be found through their `.lnk`. Both desktop
+   folders and both Start-menu folders are resolved through `IShellLinkW`. A
+   shortcut that points at an `.ico` or a directory falls back to that folder and
+   picks its main executable (measured case: a shortcut pointing at `logo.ico` only
+   resolved to the real `*-launcher.exe` through this fallback).
+3. **Add current foreground program**: takes the exe of the frontmost window
+   (skipping the settings window itself).
+4. **Browse for an exe…**: pick any executable manually.
+
+Shortcut scanning needs a **"looks like a game" test**, otherwise `cmd.exe`,
+`chrome.exe` and `devenv.exe` all end up in the list (measured: 108 of 141
+candidates were tools). The checks live in `LooksLikeGameFolder`
+(`src/games.cpp`) and the order is the semantics:
+
+1. under `\windows`, `\program files`, `\appdata\` or `\programdata\` → not a game;
+2. engine markers (`UnityPlayer.dll` / `GameAssembly.dll` / `GodotSharp` /
+   `Engine\Binaries\Win64` / `Engine\Content` / `Content\Paks`, plus
+   `*_Data\globalgamemanagers` one level down) → a game;
+3. when the folder itself is `bin` / `win64` / `binaries` / `x64` / `game`, the
+   engine markers are looked up in the parent;
+4. a `Binaries` / `Engine` / `Win64` / `Game` subfolder **and** at least 400 MB of
+   content → a game (this exists for launchers where an Electron shell wraps the
+   real payload: the shell folder holds `resources\app.asar` while the actual game
+   content sits in sibling `Cross\` / `Launcher\` folders worth hundreds of MB, so
+   it must be tested **before** rule 5 or the package is discarded as a plain
+   Electron app);
+5. an Electron shape (`icudtl.dat` or `resources\app.asar`, one level down) →
+   not a game (Doubao, KOOK and WeChat all look like this);
+6. a `.pak` / `.rpa` / `.rgss3a` / `.pck` / `.vpk` larger than 40 MB within depth
+   2 (skipping `chrome*`, `*_percent*`, `resources.pak` — those are CEF) → a game.
+
+Measured: on a machine whose desktop had 11 game shortcuts (Steam titles plus a mix
+of portable and launcher-packed games) all of them were found, while none of the
+141 shortcut candidates that were tools (`cmd.exe`, browsers, IDEs, the launchers
+themselves) made it in.
+
+Delete an entry with "remove from list" and it lands in an **ignore list**
+(`ignored=` inside `[games]` of `overlay.ini`), so the automatic scan will not
+bring it back — only an explicit re-add does. The checkbox, "enable" and
+"disable" toggle individual games at any time.
+
+The scanner skips obvious non-games: engine helper binaries (`vconsole2.exe`,
+`vguimatsurface.exe`), anti-cheat/crash handlers, redistributables
+(`vc_redist*.exe`, `dxsetup`, `dotnetfx`), and the launchers themselves (Steam /
+Epic / WeGame / GOG Galaxy / Battle.net / EA / Ubisoft / Riot / Xbox) along with
+their support folders (`common_apps`, `_CommonRedist`, `dependency_shared`, …).
 
 ## Building from source
 
@@ -240,12 +327,16 @@ the client folder or the config folder:
 | `src/plugin.h` | `PLUGINS_EXPORTDLL` declarations (every export the API requires) |
 | `src/overlay.cpp` | The overlay: layered window with GDI+ per-pixel alpha, transparent background + rounded frame, Direct2D text pass, layout, painting, dimming, dragging, snapping, persistence |
 | `src/overlay.h` | Public overlay interface (`OverlayStart` / `OverlaySetEntries` / state queries / `OverlaySaveSettings` / …) |
-| `src/settings.cpp` | Settings window: three checkboxes mirroring the real switch states, re-synced every second (the UI behind `ts3plugin_configure`) |
-| `src/settings.h` | Settings interface (`SettingsShow` modal / `SettingsShowAsync` on its own thread / `SettingsClose`) |
+| `src/settings.cpp` | Settings window: three groups (switches / game list / check for updates), controls mirror live state and re-sync every second (the UI behind `ts3plugin_configure`) |
+| `src/settings.h` | Settings interface (`SettingsShow` modal / `SettingsShowAsync` on its own thread / `SettingsShowUpdateAsync` / `SettingsClose`) |
+| `src/games.cpp` / `src/games.h` | Game list: `[games]` section read/write, process detection (400 ms cache), multi-launcher scan (Steam/Epic/GOG/Battle.net/EA/Ubisoft/WeGame), ignore list |
+| `src/update.cpp` / `src/update.h` | Check for updates: WinHTTP against the GitHub Releases API, semantic version compare, download the setup, launch a silent install |
+| `src/version.h` | `TS3OVL_VERSION` (defaults to `1.2.0`, override with `-DTS3OVL_VERSION='"..."'`) |
 | `src/test_overlay.cpp` | Standalone preview harness with 4 fake speakers |
-| `src/test_gamedetect.cpp` | Foreground-window probe reusing the overlay's detection logic |
+| `src/test_gamedetect.cpp` | Game-list / process probe reusing the overlay's detection logic |
 | `src/test_fakegame.cpp` | Fake borderless-fullscreen game window to verify the gate |
 | `src/test_settings.cpp` | Harness that runs the settings window on its own, without TS3 |
+| `src/test_update.cpp` | CLI harness for update/scan/process detection (`ver` / `games` / `scan` / `running` / `download` / `check` / `all`) |
 | `installer/setup.cpp` | The one-click installer (Win32 GUI: locate TS3, install/uninstall, silent flags) |
 | `installer/setup.rc` / `setup.manifest` / `res.h` | Installer resources: icon, both embedded DLL payloads, manifest, version info |
 | `installer/make_ico.py` | Builds the multi-size `.ico` from PNG frames |
@@ -388,6 +479,43 @@ the client folder or the config folder:
   `requestInfoUpdate(handler, PLUGIN_CLIENT, clientID)` nudges the download.
   `ts3plugin_onAvatarUpdated` must be implemented to invalidate the cache and call
   `Refresh()`, otherwise the UI never updates after the download completes.
+- **A look change must rebuild the text engine on the overlay thread.** The
+  settings window runs on another thread and the DirectWrite `IDWriteTextFormat`
+  and D2D brush objects belong to the thread that created them.
+  `OverlaySetAppearance()` only writes the shared state and posts
+  `WM_APP_REBUILD_TEXT`; the overlay thread then runs `TeardownTextEngine()` and
+  rebuilds with the new font size. Releasing them from another thread crashes. The
+  "already initialised, return early" check in `InitTextEngine` must also compare
+  `g_d2dFontPx` and `g_d2dTextColor`, otherwise a size/colour change is treated as
+  a no-op.
+- **A muted microphone must not keep you in the speaker list.**
+  `ts3plugin_onTalkStatusChangeEvent` has three statuses: `STATUS_NOT_TALKING(0)`,
+  `STATUS_TALKING(1)` and `STATUS_TALKING_WHILE_DISABLED(2)`. An early version
+  treated every non-zero value as talking, so after pressing mute the client kept
+  sending `status=2` and the overlay kept a green ring lit. Now the code asks
+  `getClientID` whether the event is about us, then reads
+  `getClientSelfVariableAsInt(handler, CLIENT_INPUT_MUTED, …)`; only
+  `status == STATUS_TALKING && !selfMuted` counts. It also implements
+  `ts3plugin_onClientSelfVariableUpdateEvent` and drops the local client as soon as
+  `flag == CLIENT_INPUT_MUTED(5)` (or `CLIENT_INPUT_DEACTIVATED`) becomes non-zero,
+  so even a late status event cannot leave a stale ring. Measured log:
+  `selfMuted=1` 51 times, `status=2` 26 times, and "`selfMuted=1` **and**
+  `status=1`" **0 times**.
+- **Shortcut scanning must call `CoInitializeEx` first.** `ShortcutExes()` resolves
+  `.lnk` files through `IShellLinkW` + `IPersistFile`; on a thread without COM
+  initialised, `CoCreateInstance(CLSID_ShellLink)` returns
+  `CO_E_NOTINITIALIZED (0x800401F0)` and the scan **silently returns zero** (the
+  first version reported `0 new` with no error at all). The function now calls
+  `CoInitializeEx(NULL, COINIT_APARTMENTTHREADED)` / `CoUninitialize()` itself.
+  Linking also needs `-luuid`, otherwise `IID_IShellLinkW` / `IID_IPersistFile` are
+  undefined.
+- **Strip the DLL (`-s`).** Without it MinGW appends 24k static-runtime symbol names
+  (the COFF symbol table, ~917 KB) to the end of the file, pointed at by PE+12 — 60 %
+  of the 1.5 MB DLL was junk the client never reads.
+- **`WritePrivateProfileSectionW` rewrites the whole ini.** Writing the `[games]`
+  section with it wipes the `[overlay]` section (position, lock, colours). So
+  `GamesSave()` instead reads the whole file, replaces only the target section and
+  writes it back, keeping every other section intact.
 
 ## Known limitations
 
@@ -404,10 +532,18 @@ the client folder or the config folder:
 - Refresh rate is about 25 fps (40 ms timer) only while somebody talks; when
   everyone is silent it drops to 4 fps (250 ms), which merely re-evaluates the
   game gate.
-- Game detection is a **heuristic** (window shape + executable blacklist) and does
-  not query the GPU driver. Exclusive fullscreen and borderless fullscreen are
-  detected reliably; a few borderless-windowed games with a caption are not — turn
-  "only while gaming" off in that case.
+- Game detection only checks whether an executable on the list is running; it does
+  not inspect window shapes or query the GPU driver. The list is built by the
+  automatic scan plus manual additions; **the first scan runs 15 s after the
+  plugin starts**, so a game already running before that may not show the overlay
+  immediately — add it manually or wait a moment.
+- The automatic scanner covers the default install locations of the common
+  launchers (Steam/Epic/GOG/Battle.net/EA/Ubisoft/WeGame) plus desktop and
+  Start-menu shortcuts. Games installed in unusual folders without a shortcut must
+  be added with "browse for an exe…" in the settings window.
+- The shortcut "looks like a game" test is heuristic: it relies on engine markers,
+  a large content archive and the Electron shape. A custom engine or a hand-rolled
+  package may slip through; add those once with "browse for an exe…".
 - The overlay is local to the machine running TeamSpeak 3; nothing is synchronised
   through the server.
 

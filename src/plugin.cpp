@@ -15,6 +15,7 @@
 #endif
 #include <windows.h>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <map>
 #include <mutex>
@@ -31,6 +32,8 @@
 #include "plugin.h"
 #include "overlay.h"
 #include "settings.h"
+#include "games.h"
+#include "version.h"
 
 /* TS3 3.6.x (64-bit client) requires API 26. Older 32-bit clients (3.5.x and
  * earlier) require 25/24 and refuse anything newer, so the value is
@@ -53,6 +56,7 @@ enum {
     MENU_ID_TOGGLE_LOCK    = 3,
     MENU_ID_RESET_POSITION = 4,
     MENU_ID_SHOW_STATE     = 5,
+    MENU_ID_CHECK_UPDATE   = 6,
 };
 
 /* ------------------------------------------------------------------ */
@@ -262,7 +266,7 @@ const char* ts3plugin_name()
 
 const char* ts3plugin_version()
 {
-    return "1.0";
+    return TS3OVL_VERSION;
 }
 
 int ts3plugin_apiVersion()
@@ -402,12 +406,13 @@ int ts3plugin_requestAutoload()
  * touches freed memory and crashes the client. That is why the captions are
  * neutral action labels and the live switch states are shown by the dedicated
  * MENU_ID_SHOW_STATE item instead. */
-static const char* const kMenuTexts[5] = {
+static const char* const kMenuTexts[6] = {
     "显示/隐藏浮窗",                                                                /* 0 */
     "仅游戏内显示：开/关",                                                          /* 1 */
     "锁定/解锁浮窗位置",                                                            /* 2 */
     "重置浮窗位置",                                                                 /* 3 */
-    "打开设置（查看/切换全部开关）…",                                                /* 4 */
+    "打开设置（游戏列表 / 全部开关）…",                                              /* 4 */
+    "检查更新…",                                                                    /* 5 */
 };
 
 /* Filled in by ts3plugin_initMenus (defined below the menu captions) and
@@ -419,16 +424,16 @@ void ts3plugin_initMenus(struct PluginMenuItem*** menuItems, char** menuIcon)
     Log("initMenus called");
     /* The array handed to the client must be NULL-terminated, so allocate
      * count + 1 entries and leave the last one NULL. */
-    const int count = 5;
+    const int count = 6;
     *menuItems = (struct PluginMenuItem**)calloc((size_t)count + 1, sizeof(struct PluginMenuItem*));
     if (!*menuItems) {
         Log("initMenus: array allocation failed");
         return;
     }
 
-    static const int kIds[5] = { MENU_ID_TOGGLE_VISIBLE, MENU_ID_ONLY_IN_GAME,
+    static const int kIds[6] = { MENU_ID_TOGGLE_VISIBLE, MENU_ID_ONLY_IN_GAME,
                                  MENU_ID_TOGGLE_LOCK, MENU_ID_RESET_POSITION,
-                                 MENU_ID_SHOW_STATE };
+                                 MENU_ID_SHOW_STATE, MENU_ID_CHECK_UPDATE };
 
     for (int i = 0; i < count; ++i) {
         struct PluginMenuItem* item =
@@ -454,7 +459,7 @@ void ts3plugin_initMenus(struct PluginMenuItem*** menuItems, char** menuIcon)
 
     g_menuProbe = *menuItems;
 
-    Log("initMenus: 5 global items created");
+    Log("initMenus: 6 global items created");
 }
 
 /* The array we handed to the client. Kept for diagnostics ONLY: the client
@@ -503,6 +508,11 @@ void ts3plugin_onMenuItemEvent(uint64 serverConnectionHandlerID, enum PluginMenu
         ts3ovl::SettingsShowAsync();
         break;
     }
+    case MENU_ID_CHECK_UPDATE: {
+        /* Same window, but it starts a version check by itself. */
+        ts3ovl::SettingsShowUpdateAsync();
+        break;
+    }
     }
     /* NOTE: never write to the menu item structs here - the client freed them
      * right after building the menu (see kMenuTexts). */
@@ -511,19 +521,91 @@ void ts3plugin_onMenuItemEvent(uint64 serverConnectionHandlerID, enum PluginMenu
 /* ------------------------------------------------------------------ */
 /* client callbacks                                                    */
 /* ------------------------------------------------------------------ */
+/* Talk status.
+ *
+ * STATUS_TALKING (1)                -> the client is audible, show as speaker.
+ * STATUS_TALKING_WHILE_DISABLED (2) -> the *microphone is off* (input muted or
+ *   deactivated by TS3's own mute button / voice activation settings) while the
+ *   client still generates a "talking" report. Treating this as talking is what
+ *   made a muted microphone keep lighting up the overlay, so it counts as NOT
+ *   talking. Anything else is not talking either.
+ */
 void ts3plugin_onTalkStatusChangeEvent(uint64 serverConnectionHandlerID, int status,
                                        int isReceivedWhisper, anyID clientID)
 {
     (void)isReceivedWhisper;
+
+    /* Second guard for our own client: while the microphone is muted the client
+     * still reports talking for a fraction of a second before the mute
+     * propagates, so the self client is checked explicitly. Done outside the
+     * lock because it goes through the client API. */
+    bool selfMuted = false;
+    {
+        anyID self = 0;
+        if (ts3Functions.getClientID &&
+            ts3Functions.getClientID(serverConnectionHandlerID, &self) == ERROR_ok &&
+            self == clientID) {
+            int muted = MUTEINPUT_NONE;
+            if (ts3Functions.getClientSelfVariableAsInt &&
+                ts3Functions.getClientSelfVariableAsInt(serverConnectionHandlerID,
+                                                        CLIENT_INPUT_MUTED,
+                                                        &muted) == ERROR_ok &&
+                muted == MUTEINPUT_MUTED) {
+                selfMuted = true;
+            }
+        }
+    }
+
     {
         std::lock_guard<std::mutex> lk(g_lock);
         if (g_handler != serverConnectionHandlerID) return;
-        if (status == STATUS_NOT_TALKING)
-            g_talking.erase(clientID);
-        else
+        if (status == STATUS_TALKING && !selfMuted)
             g_talking.insert(clientID);
+        else
+            g_talking.erase(clientID);
+    }
+    {
+        char msg[160];
+        _snprintf_s(msg, sizeof(msg), _TRUNCATE,
+                    "onTalkStatusChange: client=%u status=%d selfMuted=%d",
+                    (unsigned)clientID, status, selfMuted ? 1 : 0);
+        Log(msg);
     }
     Refresh();
+}
+
+/* The user toggled one of their own client variables (microphone mute, output
+ * mute, input deactivation, ...). The talk status stream cannot be trusted the
+ * moment the microphone state changes, so the self client is dropped from the
+ * speaker set when the microphone gets muted.
+ * flag is one of the CLIENT_* enums; newValue is the decimal value as text. */
+void ts3plugin_onClientSelfVariableUpdateEvent(uint64 serverConnectionHandlerID, int flag,
+                                               const char* oldValue, const char* newValue)
+{
+    (void)oldValue;
+    if (!newValue) return;
+    bool refresh = false;
+    {
+        std::lock_guard<std::mutex> lk(g_lock);
+        if (g_handler != serverConnectionHandlerID) return;
+        if (flag == CLIENT_INPUT_MUTED || flag == CLIENT_INPUT_DEACTIVATED) {
+            const bool nowMuted = (atoi(newValue) != 0);
+            if (nowMuted) {
+                anyID self = 0;
+                if (ts3Functions.getClientID &&
+                    ts3Functions.getClientID(serverConnectionHandlerID, &self) == ERROR_ok) {
+                    g_talking.erase(self);
+                }
+            }
+            refresh = true;
+            char msg[160];
+            _snprintf_s(msg, sizeof(msg), _TRUNCATE,
+                        "onClientSelfVariableUpdate: flag=%d old=%s new=%s",
+                        flag, oldValue ? oldValue : "", newValue);
+            Log(msg);
+        }
+    }
+    if (refresh) Refresh();
 }
 
 void ts3plugin_onConnectStatusChangeEvent(uint64 serverConnectionHandlerID, int newStatus,

@@ -9,12 +9,15 @@
 ## 特性
 
 - **悬浮在最上层**：`WS_EX_TOPMOST | WS_EX_LAYERED`，游戏全屏窗口化、浏览器、播放器上都能显示。
-- **背景透明**：只画一圈圆角边框（深色光晕 + 白色描边），不填背景，游戏画面完全透出；昵称带 1px 黑色描边保证在亮背景上也能读清。
+- **背景可调**：默认不画背景（只有一圈圆角边框，深色光晕 + 白色描边，游戏画面完全透出）；也可以在设置窗口里给背景上色并调**不透明度 0–100%**，比如设成 70% 的深灰让文字更好读。昵称始终带 1px 黑色描边。
+- **颜色 / 字号都能改**：文字颜色（任意颜色，`ChooseColor` 取色器）与字号（8–32 px）在设置窗口「外观」组里实时生效，改完立刻重绘并写进 `overlay.ini`。
+- **静音时就真的不说话了**：`STATUS_TALKING_WHILE_DISABLED` 与本地麦克风静音状态都会被检查，按下 TS3 的静音键后自己立刻从说话列表里移除，不会出现"关了麦浮窗还在说我说话"。
 - **显示自己频道里的所有人**：用 `getChannelClientList` 取本频道成员；说话的人高亮 + 呼吸绿环，其余人**变暗但保留在原位**（KOOK 的行为），图标不会因为没人说话而突然消失。
 - **头像 + 昵称**：通过 `ts3Functions.getAvatar()` 取客户端头像并裁成圆形；没有头像时退化成"首字彩色圆盘"。
 - **支持 emoji 昵称**：昵称文字走 Direct2D + DirectWrite 彩色字体渲染，😂🎮👍❤️ 等 emoji 正常显示（GDI+ 没有字体回退，会把 emoji 画成空框）。
 - **讲话呼吸环**：说话的人有绿色脉冲圆环，多人同时说话按 clientID 稳定排序，不会跳来跳去。
-- **只在游戏内出现**（可关）：检测前台窗口是不是游戏，桌面/浏览器/聊天软件前台时浮窗完全不出现，只有进游戏才显示——和 KOOK 一致。
+- **只在游戏内出现**（可关）：维护一份游戏名单，**名单里的游戏进程一启动就显示**（不要求前台、不要求全屏）；自动扫描 Steam / Epic / WeGame / GOG / Battle.net / EA / Ubisoft，新装游戏默认开启。
+- **游戏名单可手动管理**：设置窗口里勾选、启用/关闭、从列表删除；删掉的不再被自动扫描加回来。
 - **贴近屏幕边缘自动吸附**：拖到距边缘 36px 以内松手，自动贴边对齐。
 - **离开频道才隐藏**：频道里没人（未连接 / 频道空）时整个窗口 `SW_HIDE`；只要还有成员就常驻，没人说话时只是全部变暗。
 - **可拖动 / 可锁定**：解锁时左键拖动换位置，位置写进 `overlay.ini`；锁定后 `WS_EX_TRANSPARENT` 完全鼠标穿透，点击落到游戏里。
@@ -91,27 +94,60 @@ TS3 的 `PluginMenuItem` 结构体**没有 checked/勾选字段**，客户端**�
 
 ![设置窗口](docs/settings.png)
 
-窗口里三个复选框始终反映真实状态，勾/取消立刻生效并写入 `overlay.ini`；底部状态行还会告诉你浮窗当前是否真的在屏幕上（以及是否正被「仅游戏内显示」挡着）。窗口每秒自动同步一次，即使状态是从菜单改的也会跟着更新。
+窗口分四块：上面三个复选框控制显示/只在游戏内/锁定；「外观」分组里是文字颜色、背景颜色、背景不透明度滑块、字号下拉和「恢复默认外观」；「游戏列表」分组里是名单 + 一行按钮（添加当前前台程序 / 浏览选择 exe… / 扫描已安装的游戏 / 启用 / 关闭 / 从列表删除）；「检查更新」分组里是当前版本、检查更新、打开发布页、状态文字和下载并安装。所有控件都不会互相重叠，窗口可以自由缩放（最小 760×700），按钮行始终贴在列表下方。
+
+底部状态行告诉你浮窗当前是否真的在屏幕上（以及是否正被「仅游戏内显示」挡着）。窗口每秒自动同步一次，即使状态是从菜单改的也会跟着更新。
 
 > 菜单里的前 4 项依旧可以随时切换，只是它们的**文字是固定的动作描述**，状态请看设置窗口。
 
 **拖动 + 吸附**：解锁状态下直接用左键拖悬浮窗即可，松手时如果距屏幕边缘 36px 以内会自动贴边对齐，位置保存到 `overlay.ini`（在插件目录，`[overlay]` 段落里的 `x` / `y` / `locked` / `onlyInGame`）。
 
-### 外观：背景透明，只留圆角边框
+### 外观：背景、文字颜色、字号都能改
 
-浮窗**不画背景填充**，只有一圈圆角边框（外层深色光晕 + 内层白色描边），所以游戏画面完全透出来，不会挡住视野。为了让透明背景上的白字始终可读，昵称文字额外画了一层 1px 黑色描边（Direct2D 双层绘制）。
+浮窗默认**不画背景填充**，只有一圈圆角边框（外层深色光晕 + 内层白色描边），所以游戏画面完全透出来。昵称文字额外画了一层 1px 黑色描边（Direct2D 双层绘制），透明背景上的白字也能读清。
+
+设置窗口的「外观」组里有四项，全部**即时生效**并立刻写进 `overlay.ini`：
+
+| 控件 | 作用 | ini 键 |
+| --- | --- | --- |
+| 文字颜色… | 取色器选昵称颜色 | `textColor=0xAARRGGBB`（alpha 强制 FF） |
+| 背景颜色… | 取色器选面板底色 | `bgColor=0xAARRGGBB` |
+| 背景不透明度 | 0–255 滑块（显示百分比） | 改的是 `bgColor` 的 alpha 字节 |
+| 字号 | 8 / 10 / … / 32 px 下拉 | `fontSize=<px>` |
+
+`bgColor` 的 alpha 为 0 时完全不画背景（默认）；「恢复默认外观」把三项恢复成「透明背景 / 白色文字 / 12 px」。
+
+> 改外观时插件会 `PostMessage(WM_APP_REBUILD_TEXT)` 把 `TeardownTextEngine()` 拉回浮窗自己的线程再重建 DirectWrite 格式对象——跨线程直接碰 D2D 对象会崩。字号变大后如果窗口超出屏幕，位置会自动夹回工作区内。
 
 ### "只在游戏内显示"是怎么判定的
 
-`src/overlay.cpp` 的 `IsGameWindow()`，每帧（约 25fps）对当前前台窗口判一次：
+不再看前台窗口了。`src/games.cpp` 维护一份**游戏名单**，每 400ms 枚举一次进程列表：**名单里任何一个"已开启"的 exe 正在运行，浮窗就显示**，跟谁有焦点、是不是全屏、是不是窗口化全部无关。所以：
 
-1. 排除 shell 窗口：`Progman` / `WorkerW` / `Shell_TrayWnd` / `ApplicationFrameWindow` / `CEF-OSC-WIDGET`（NVIDIA、Discord 等厂商覆盖层）等。
-2. 排除黑名单 exe：浏览器、聊天、编辑器、终端、播放器、录屏/显卡工具、`ts3client_win64.exe` 自身等（完整列表见 `kNonGameExes[]`）。
-3. 判定为游戏，满足任一：
-   - 窗口矩形铺满整个显示器（容差 2px）→ 独占全屏 / 无边框全屏；
-   - 无标题栏、无缩放边框、非 `WS_EX_TOOLWINDOW`、非 `WS_EX_TOPMOST`，且宽高 ≥ 屏幕一半 → 窗口化无边框游戏。
+- 游戏在后台跑着（你切出去看网页）浮窗照样显示；
+- 没在跑的游戏即使在前台也不会让浮窗出现；
+- 判定只认 exe 文件名（小写），例如 `cs2.exe`。
 
-判定不依赖游戏名单，新游戏不用改代码；遇到误判可把 exe 名加进 `kNonGameExes[]` 后重新编译。
+名单有三种来源：
+
+1. **自动扫描**（默认开启）：插件启动 15 秒后扫一次，之后每 60 秒扫一次，把新装的游戏加进来，**新加的一律默认开启浮窗**。扫描器支持 Steam（`libraryfolders.vdf` + `appmanifest_*.acf`）、Epic（`LauncherInstalled.dat` + `Manifests\*.item`）、GOG（注册表）、Battle.net、EA、Ubisoft，以及各固定盘的 `WeGameApps` / `Epic Games` / `GOG Games` / `XboxGames` / `Riot Games` / `Games` 等目录树。
+2. **桌面 / 开始菜单快捷方式**：绿色版、免安装、启动器不认识的游戏只能靠 `.lnk` 找到。扫描器会解析桌面（两份）与开始菜单（两份）里的快捷方式，取目标 exe。快捷方式指向 `.ico` / 目录这类非 exe 的情况会退回该目录再找主 exe（实测有个游戏的快捷方式指向 `logo.ico`，靠这一步才拿到真正的 `*-launcher.exe`）。
+3. **添加当前前台程序**：把现在最前面那个窗口的 exe 加进名单（会自动跳过设置窗口自己）。
+4. **浏览选择 exe…**：手动指定任意 exe。
+
+快捷方式这条路必须做**「像游戏」判定**，否则 `cmd.exe`、`chrome.exe`、`devenv.exe` 都会被加进来（实测 141 个候选里 108 个是工具）。判定顺序（`src/games.cpp` 的 `LooksLikeGameFolder`，顺序即语义）：
+
+1. 命中 `\windows`、`\program files`、`\appdata\`、`\programdata\` → 不是游戏；
+2. 目录里有引擎标记（`UnityPlayer.dll` / `GameAssembly.dll` / `GodotSharp` / `Engine\Binaries\Win64` / `Engine\Content` / `Content\Paks`，含一层子目录里的 `*_Data\globalgamemanagers`）→ 是游戏；
+3. 目录名是 `bin` / `win64` / `binaries` / `x64` / `game` 时再看父目录的引擎标记；
+4. 有 `Binaries` / `Engine` / `Win64` / `Game` 目录**且**目录内容 ≥400 MB → 是游戏（这条专为「Electron 外壳包着游戏负载」的启动器准备：外壳目录里有 `resources\app.asar`，真正的游戏内容在旁边的 `Cross\` / `Launcher\` 里，加起来几百 MB，必须先于第 5 步判，否则会被当成普通 Electron 应用丢掉）；
+5. 有 Electron 形状（`icudtl.dat` 或 `resources\app.asar`，含一层子目录）→ 不是游戏（豆包、KOOK、微信都长这样）；
+6. 深度 2 内存在 >40 MB 的 `.pak` / `.rpa` / `.rgss3a` / `.pck` / `.vpk`（跳过 `chrome*`、`*_percent*`、`resources.pak`，那是 CEF 的东西）→ 是游戏。
+
+实测：一个桌面上有 11 个游戏快捷方式（Steam 系 + 各种绿色版 / 启动器版）的机器上全部命中，141 个快捷方式候选里的工具类（`cmd.exe`、浏览器、IDE、启动器本身）一个都没进来。
+
+不需要的游戏在设置窗口里点「从列表删除」即可；被删掉的会进**忽略名单**（`overlay.ini` 里 `[games]` 的 `ignored=`），自动扫描不会再把它加回来，除非你手动再添加一次。勾选框 / 「启用」「关闭」可以随时开关单个游戏。
+
+扫描器会跳过一堆明显的非游戏程序：引擎辅助程序（`vconsole2.exe`、`vguimatsurface.exe`）、反作弊、崩溃上报、运行库安装包（`vc_redist*.exe`、`dxsetup`、`dotnetfx`）、以及各家启动器本身（Steam / Epic / WeGame / GOG Galaxy / Battle.net / EA / Ubisoft / Riot / Xbox）和它们的依赖目录（`common_apps`、`_CommonRedist`、`dependency_shared` 等）。
 
 ## 从源码构建
 
@@ -155,14 +191,18 @@ TS3 的 `PluginMenuItem` 结构体**没有 checked/勾选字段**，客户端**�
 | --- | --- |
 | `src/plugin.cpp` | TS3 插件主体：导出符号、事件回调、频道成员列表、头像/昵称缓存、菜单 |
 | `src/plugin.h` | `PLUGINS_EXPORTDLL` 声明（API 26 要求的全部导出） |
-| `src/overlay.cpp` | 悬浮窗：分层窗口 + GDI+ 每像素 alpha、透明背景 + 圆角边框、Direct2D 文字层、布局、绘制、变暗、拖动、吸附、持久化 |
-| `src/overlay.h` | 悬浮窗对外接口（`OverlayStart` / `OverlaySetEntries` / 状态查询 / `OverlaySaveSettings` / ...） |
-| `src/settings.cpp` | 设置窗口：三个复选框实时反映开关状态，每秒自动同步（`ts3plugin_configure` 的 UI） |
-| `src/settings.h` | 设置窗口接口（`SettingsShow` 模态 / `SettingsShowAsync` 另起线程 / `SettingsClose`） |
+| `src/overlay.cpp` | 悬浮窗：分层窗口 + GDI+ 每像素 alpha、可配色/可调不透明度的圆角面板、Direct2D 文字层、布局、绘制、变暗、拖动、吸附、持久化 |
+| `src/overlay.h` | 悬浮窗对外接口（`OverlayStart` / `OverlaySetEntries` / 状态查询 / `OverlayGetAppearance` / `OverlaySetAppearance` / `OverlaySaveSettings` / ...） |
+| `src/settings.cpp` | 设置窗口：四块分组（开关 / 外观 / 游戏列表 / 检查更新），控件实时反映状态并每秒同步（`ts3plugin_configure` 的 UI） |
+| `src/settings.h` | 设置窗口接口（`SettingsShow` 模态 / `SettingsShowAsync` 另起线程 / `SettingsShowUpdateAsync` / `SettingsClose`） |
+| `src/games.cpp` / `src/games.h` | 游戏名单：`[games]` 段读写、进程检测（400ms 缓存）、多平台扫描（Steam/Epic/GOG/Battle.net/EA/Ubisoft/WeGame）、桌面/开始菜单快捷方式扫描与「像游戏」判定、忽略名单 |
+| `src/update.cpp` / `src/update.h` | 检查更新：WinHTTP 请求 GitHub Releases API、语义化版本比较、下载安装包、启动静默安装 |
+| `src/version.h` | `TS3OVL_VERSION`（默认 `1.2.0`，可用 `-DTS3OVL_VERSION='"..."'` 覆盖） |
 | `src/test_overlay.cpp` | 独立预览程序，塞 4 个假说话人 |
-| `src/test_gamedetect.cpp` | 前台窗口探测器，调用浮窗同一份判定逻辑 |
+| `src/test_gamedetect.cpp` | 游戏名单/进程探测器，调用浮窗同一份判定逻辑 |
 | `src/test_fakegame.cpp` | 假游戏窗口（无边框全屏），验证游戏闸门 |
 | `src/test_settings.cpp` | 单独跑设置窗口的 harness（不开 TS3 也能看界面） |
+| `src/test_update.cpp` | 检查更新/扫描/进程检测的 CLI harness（`ver` / `games` / `scan` / `running` / `download` / `check` / `all`） |
 | `installer/setup.cpp` | 一键安装器主体（Win32 GUI，查找 TS3 / 装卸 / 静默开关） |
 | `installer/setup.rc` / `setup.manifest` / `res.h` | 安装器资源：图标、内嵌双 DLL 载荷、manifest、版本信息 |
 | `installer/make_ico.py` | 由 PNG 帧生成多尺寸 `.ico` |
@@ -253,6 +293,30 @@ TS3 的 `PluginMenuItem` 结构体**没有 checked/勾选字段**，客户端**�
   （有路径 / 没有头像），"还没下载"每帧重问，并顺手 `requestInfoUpdate(handler, PLUGIN_CLIENT, clientID)`
   踢一次下载。必须实现 `ts3plugin_onAvatarUpdated` 并在里面清缓存 + `Refresh()`，否则
   下载完成后界面不会更新。
+- **改外观必须回到浮窗线程再重建文字引擎**。设置窗口跑在另一个线程上，而 DirectWrite 的
+  `IDWriteTextFormat` / D2D 画刷属于创建它们的线程。`OverlaySetAppearance()` 只写共享状态并
+  `PostMessage(WM_APP_REBUILD_TEXT)`，浮窗线程收到后 `TeardownTextEngine()` 再按新字号重建；
+  跨线程直接 Release/Destroy 会崩。`InitTextEngine` 的"已初始化就早退"条件里必须带上
+  `g_d2dFontPx` 和 `g_d2dTextColor`，否则改了字号/颜色会被当成重复初始化直接跳过。
+- **静音后不能还显示"在说话"**。`ts3plugin_onTalkStatusChangeEvent` 的 `status` 有三种：
+  `STATUS_NOT_TALKING(0)` / `STATUS_TALKING(1)` / `STATUS_TALKING_WHILE_DISABLED(2)`。
+  早期代码把 `!= 0` 一律当说话，于是按下静音键后客户端继续发 `status=2`，浮窗就一直亮着绿环。
+  现在先 `getClientID` 判断是不是自己、再 `getClientSelfVariableAsInt(handler, CLIENT_INPUT_MUTED, …)`
+  拿本机静音状态，只有 `status == STATUS_TALKING && !selfMuted` 才算说话；另外实现
+  `ts3plugin_onClientSelfVariableUpdateEvent`，`flag == CLIENT_INPUT_MUTED(5)`（或
+  `CLIENT_INPUT_DEACTIVATED`）变成非 0 时立刻把本机从说话集合里剔除——这样连"最后一次
+  status 事件晚到"的窗口期也没有。实测日志：`selfMuted=1` 51 条、`status=2` 26 条，
+  而"`selfMuted=1` 且 `status=1`"**0 条**。
+- **快捷方式扫描必须先 `CoInitializeEx`**。`ShortcutExes()` 里用 `IShellLinkW` + `IPersistFile`
+  解析 `.lnk`，如果当前线程没初始化 COM，`CoCreateInstance(CLSID_ShellLink)` 返回
+  `CO_E_NOTINITIALIZED (0x800401F0)`，扫描会**静默返回 0 个**（第一版实测 `0 new`，看不出任何错误）。
+  现在函数内部自己 `CoInitializeEx(NULL, COINIT_APARTMENTTHREADED)` / `CoUninitialize()`。
+  链接还需要 `-luuid`，否则 `IID_IShellLinkW` / `IID_IPersistFile` 未定义。
+- **DLL 一定要 `-s`**：不加 strip 时 MinGW 会把 24k 个静态运行库符号名（COFF 符号表，约 917 KB）
+  整块追加在文件尾部（PE+12 指向它），1.5 MB 的 DLL 里 60% 是垃圾。客户端根本不读符号表。
+- **`WritePrivateProfileSectionW` 会重写整个 ini**。用它在 `[games]` 段写名单时，`[overlay]` 段会被
+  整段抹掉（位置、锁定、颜色全丢）。所以 `GamesSave()` 改成文本级"读全文 → 只替换目标段 →
+  写回"，并在写回前保留其它段。
 
 ## 已知限制
 
@@ -261,7 +325,9 @@ TS3 的 `PluginMenuItem` 结构体**没有 checked/勾选字段**，客户端**�
 - 只处理"当前服务器连接 + 当前频道"，多服务器同时连接时显示当前活动的那一个。
 - 超过 12 人（`kMaxRows`）的频道只显示前 12 行，说话的人会被提到最前面，所以正在说话的人不会被截掉。
 - 采样率约 25 fps（40 ms 定时器）只在有人说话时；全员安静时降到 4 fps（250 ms），只负责重新判定游戏闸门。
-- 游戏判定是**启发式**的（窗口形状 + exe 黑名单），不读显卡驱动。独占全屏、无边框全屏能准确识别；少数带标题栏的窗口化游戏不会被判为游戏——把"仅游戏内显示"关掉即可。
+- 游戏判定只看名单里的 exe 是否在运行，不读窗口形状、不读显卡驱动。名单由自动扫描 + 手动添加维护；**首次扫描发生在插件启动 15 秒后**，这之前即使游戏在跑也不会显示，可手动添加或稍等片刻。
+- 自动扫描只覆盖常见启动器的默认安装位置（Steam/Epic/GOG/Battle.net/EA/Ubisoft/WeGame 等），以及桌面 / 开始菜单的快捷方式；装在非常规目录、又没有快捷方式的游戏请在设置窗口里手动「浏览选择 exe…」。
+- 快捷方式的「像游戏」判定是启发式的：靠引擎标记、大体积内容包、Electron 外形来区分。新型引擎或自定义打包的自研游戏可能判不出来，这种情况用「浏览选择 exe…」加一次即可。
 - 浮窗只作用于本机运行 TS3 的用户，不通过服务器同步。
 
 ## 许可

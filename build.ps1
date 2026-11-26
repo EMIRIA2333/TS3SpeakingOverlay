@@ -79,7 +79,7 @@ foreach ($b in @($BuildDir, $BuildDir32)) {
 }
 
 # --- compile helpers -----------------------------------------------------
-$libs = @('-lgdiplus', '-lgdi32', '-luser32', '-lshell32', '-lole32', '-ld2d1', '-ldwrite')
+$libs = @('-lgdiplus', '-lgdi32', '-luser32', '-lshell32', '-lole32', '-luuid', '-ld2d1', '-ldwrite', '-lwinhttp', '-lcomctl32', '-lcomdlg32')
 $commonDefs = @('-D_WIN32_WINNT=0x0601', '-DWIN32_LEAN_AND_MEAN', '-DNOMINMAX', '-DUNICODE', '-D_UNICODE')
 $commonFlags = @('-std=c++17', '-O2', '-static', '-static-libgcc', '-static-libstdc++', '-Wall', '-Wextra')
 
@@ -91,13 +91,18 @@ function Build-Plugin {
     $inc = @(('-I' + (Join-Path $BuildRoot 'src')), ('-I' + (Join-Path $BuildRoot 'include')))
     $a = @()
     $a += $commonFlags
-    $a += @('-shared', '-o', $Out)
+    # '-s' drops the COFF symbol table. Without it the 24k local symbols of the
+    # static C++ runtime are appended to the DLL (1.5 MB -> 0.56 MB), which only
+    # makes the download bigger - the client never reads them.
+    $a += @('-shared', '-s', '-o', $Out)
     $a += $inc
     $a += $commonDefs
     $a += @('-DPLUGIN_API_VERSION=' + $ApiVersion)
     $a += @((Join-Path $BuildRoot 'src\plugin.cpp'),
             (Join-Path $BuildRoot 'src\overlay.cpp'),
-            (Join-Path $BuildRoot 'src\settings.cpp'))
+            (Join-Path $BuildRoot 'src\settings.cpp'),
+            (Join-Path $BuildRoot 'src\games.cpp'),
+            (Join-Path $BuildRoot 'src\update.cpp'))
     $a += $libs
 
     Write-Host ("compiling [$Label, API $ApiVersion] -> $Out")
@@ -125,7 +130,8 @@ if (-not $SkipTests) {
                '-static', '-static-libgcc', '-static-libstdc++',
                '-Wall', '-Wextra', '-o', $harness) + $inc + $commonDefs +
              @((Join-Path $BuildDir 'src\test_overlay.cpp'),
-               (Join-Path $BuildDir 'src\overlay.cpp')) + $libs
+               (Join-Path $BuildDir 'src\overlay.cpp'),
+               (Join-Path $BuildDir 'src\games.cpp')) + $libs
     & $gpp @hArgs 2>&1 | ForEach-Object { Write-Host $_ }
     if ($LASTEXITCODE -ne 0) { throw "harness compile failed with exit code $LASTEXITCODE" }
 
@@ -137,7 +143,8 @@ if (-not $SkipTests) {
                '-static', '-static-libgcc', '-static-libstdc++',
                '-Wall', '-Wextra', '-o', $probe) + $inc + $commonDefs +
              @((Join-Path $BuildDir 'src\test_gamedetect.cpp'),
-               (Join-Path $BuildDir 'src\overlay.cpp')) + $libs
+               (Join-Path $BuildDir 'src\overlay.cpp'),
+               (Join-Path $BuildDir 'src\games.cpp')) + $libs
     & $gpp @pArgs 2>&1 | ForEach-Object { Write-Host $_ }
     if ($LASTEXITCODE -ne 0) { throw "probe compile failed with exit code $LASTEXITCODE" }
 
@@ -147,11 +154,29 @@ if (-not $SkipTests) {
                 '-static', '-static-libgcc', '-static-libstdc++',
                 '-Wall', '-Wextra', '-o', $fakegame) + $inc + $commonDefs +
               @((Join-Path $BuildDir 'src\test_fakegame.cpp'),
-                (Join-Path $BuildDir 'src\overlay.cpp')) + $libs
+                (Join-Path $BuildDir 'src\overlay.cpp'),
+                (Join-Path $BuildDir 'src\games.cpp')) + $libs
     & $gpp @fgArgs 2>&1 | ForEach-Object { Write-Host $_ }
     if ($LASTEXITCODE -ne 0) { throw "fakegame compile failed with exit code $LASTEXITCODE" }
 
     $built += @($harness, $probe, $fakegame)
+
+    # Console harness (prints the window geometry), so no -mwindows/-municode:
+    # those make MinGW look for wWinMain/wmain while test_settings.cpp has main().
+    $settingsExe = Join-Path $BuildDir 'test_settings.exe'
+    Write-Host "compiling -> $settingsExe"
+    $sArgs = @('-std=c++17', '-O2',
+               '-static', '-static-libgcc', '-static-libstdc++',
+               '-Wall', '-Wextra', '-o', $settingsExe) + $inc + $commonDefs +
+             @((Join-Path $BuildDir 'src\test_settings.cpp'),
+               (Join-Path $BuildDir 'src\settings.cpp'),
+               (Join-Path $BuildDir 'src\overlay.cpp'),
+               (Join-Path $BuildDir 'src\games.cpp'),
+               (Join-Path $BuildDir 'src\update.cpp')) + $libs
+    & $gpp @sArgs 2>&1 | ForEach-Object { Write-Host $_ }
+    if ($LASTEXITCODE -ne 0) { throw "settings harness compile failed with exit code $LASTEXITCODE" }
+
+    $built += @($settingsExe)
 }
 
 # --- verify the DLLs do not import UCRT apisets --------------------------
